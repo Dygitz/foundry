@@ -800,7 +800,7 @@ fn chunk_loaded_system(
             continue;
         }
 
-        let texture_handle = images.add(build_chunk_image(&data, &config));
+        let texture_handle = images.add(build_chunk_image(&data, &config, session.world_seed));
         let chunk_size = chunk_world_size(&config);
         let center = chunk_center_world(data.coord, chunk_size);
         let entity = commands
@@ -948,24 +948,12 @@ fn generate_chunk_data(
     let edge = CHUNK_EDGE as usize;
     let base_x = coord.cx * CHUNK_EDGE as i32;
     let base_y = coord.cy * CHUNK_EDGE as i32;
-    let seed = world_seed ^ (layer as u64).wrapping_mul(0x9e3779b97f4a7c15);
     let mut tiles = Vec::with_capacity(CHUNK_TILE_COUNT);
     for y in 0..edge {
         let gy = base_y + y as i32;
         for x in 0..edge {
             let gx = base_x + x as i32;
-            let coarse_x = gx >> 3;
-            let coarse_y = gy >> 3;
-            let h = terrain_hash(coarse_x, coarse_y, seed);
-            let v = (h & 0xFFFF) as u16;
-            let variant = (terrain_hash(gx, gy, seed ^ 0x5bf03635f7d13d9b) >> 8) as u8;
-            let tile = if v < 5000 {
-                6
-            } else if v < 16000 {
-                4 + (variant % 2) as TileId
-            } else {
-                (variant % 4) as TileId
-            };
+            let tile = terrain_tile_id(gx, gy, layer, world_seed);
             tiles.push(tile);
         }
     }
@@ -975,6 +963,22 @@ fn generate_chunk_data(
         tiles,
         entities: Vec::new(),
         saved_tick,
+    }
+}
+
+fn terrain_tile_id(gx: i32, gy: i32, layer: ChunkLayer, world_seed: u64) -> TileId {
+    let seed = world_seed ^ (layer as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    let coarse_x = gx >> 3;
+    let coarse_y = gy >> 3;
+    let h = terrain_hash(coarse_x, coarse_y, seed);
+    let v = (h & 0xFFFF) as u16;
+    let variant = (terrain_hash(gx, gy, seed ^ 0x5bf03635f7d13d9b) >> 8) as u8;
+    if v < 5000 {
+        WATER_TILE
+    } else if v < 16000 {
+        4 + (variant % 2) as TileId
+    } else {
+        (variant % 4) as TileId
     }
 }
 
@@ -1009,8 +1013,12 @@ fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
     )
 }
 
-fn build_chunk_image(data: &SimChunkData, config: &WorldRenderConfig) -> Image {
-    let pixels = chunk_pixels(data, config);
+fn build_chunk_image(
+    data: &SimChunkData,
+    config: &WorldRenderConfig,
+    world_seed: u64,
+) -> Image {
+    let pixels = chunk_pixels(data, config, world_seed);
     let padded_edge = CHUNK_EDGE as u32 + 2;
     let mut image = Image::new_fill(
         Extent3d {
@@ -1027,7 +1035,7 @@ fn build_chunk_image(data: &SimChunkData, config: &WorldRenderConfig) -> Image {
     image
 }
 
-fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig) -> Vec<u8> {
+fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig, world_seed: u64) -> Vec<u8> {
     let edge = CHUNK_EDGE as usize;
     let padded_edge = edge + 2;
     let mut pixels = Vec::with_capacity(padded_edge * padded_edge * 4);
@@ -1050,9 +1058,25 @@ fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig) -> Vec<u8> {
                 ox - 1
             };
             let interior_x = ox as i32 - 1;
-            let idx = ty * edge + tx;
-            let tile = data.tiles.get(idx).copied().unwrap_or(0);
-            let mut color = tile_color(tile);
+            let tile = tile_at(data, tx as i32, ty as i32, world_seed);
+            let mut color = if tile == WATER_TILE {
+                let neighbor_is_land =
+                    !is_water(tile_at(data, tx as i32 - 1, ty as i32, world_seed))
+                        || !is_water(tile_at(data, tx as i32 + 1, ty as i32, world_seed))
+                        || !is_water(tile_at(data, tx as i32, ty as i32 - 1, world_seed))
+                        || !is_water(tile_at(data, tx as i32, ty as i32 + 1, world_seed));
+                if neighbor_is_land {
+                    shallow_water_color()
+                } else {
+                    tile_color(tile)
+                }
+            } else {
+                tile_color(tile)
+            };
+            let gx = data.coord.cx * CHUNK_EDGE as i32 + tx as i32;
+            let gy = data.coord.cy * CHUNK_EDGE as i32 + ty as i32;
+            let jitter = tile_jitter(gx, gy, world_seed, tile);
+            color = apply_jitter(color, jitter);
             if config.show_chunk_borders
                 && interior_x >= 0
                 && interior_y >= 0
@@ -1079,12 +1103,49 @@ fn tile_color(tile: TileId) -> [u8; 4] {
     }
 }
 
+fn shallow_water_color() -> [u8; 4] {
+    [70, 120, 190, 255]
+}
+
 fn darken_color(color: [u8; 4]) -> [u8; 4] {
     let r = (color[0] as u16 * 4 / 5) as u8;
     let g = (color[1] as u16 * 4 / 5) as u8;
     let b = (color[2] as u16 * 4 / 5) as u8;
     [r, g, b, color[3]]
 }
+
+fn apply_jitter(color: [u8; 4], jitter: i8) -> [u8; 4] {
+    let adjust = |value: u8| -> u8 {
+        let v = value as i16 + jitter as i16;
+        v.clamp(0, 255) as u8
+    };
+    [adjust(color[0]), adjust(color[1]), adjust(color[2]), color[3]]
+}
+
+fn tile_jitter(gx: i32, gy: i32, world_seed: u64, tile: TileId) -> i8 {
+    let seed = world_seed ^ (tile as u64).wrapping_mul(0x94d049bb133111eb);
+    let h = terrain_hash(gx, gy, seed);
+    let range = if tile == WATER_TILE { 3 } else { 6 };
+    let offset = (h % ((range * 2 + 1) as u32)) as i8 - range;
+    offset
+}
+
+fn tile_at(data: &SimChunkData, tx: i32, ty: i32, world_seed: u64) -> TileId {
+    let edge = CHUNK_EDGE as i32;
+    if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
+        let idx = (ty as usize) * (edge as usize) + (tx as usize);
+        return data.tiles.get(idx).copied().unwrap_or(0);
+    }
+    let gx = data.coord.cx * CHUNK_EDGE as i32 + tx;
+    let gy = data.coord.cy * CHUNK_EDGE as i32 + ty;
+    terrain_tile_id(gx, gy, data.layer, world_seed)
+}
+
+fn is_water(tile: TileId) -> bool {
+    tile == WATER_TILE
+}
+
+const WATER_TILE: TileId = 6;
 
 fn terrain_hash(x: i32, y: i32, seed: u64) -> u32 {
     let mut z = seed;
