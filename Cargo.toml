@@ -25,3 +25,4 @@ strip = "debuginfo"
 
 [dependencies]
 bevy = "0.16.1"
+idb = "0.6.4"
