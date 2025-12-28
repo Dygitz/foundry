@@ -25,6 +25,7 @@ pub fn run() {
         .insert_resource(WorldRenderConfig::default())
         .insert_resource(WorldRuntime::default())
         .insert_resource(ChunkCacheConfig::default())
+        .insert_resource(PlayerConfig::default())
         .insert_resource(EvictionStats::default())
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
@@ -55,7 +56,8 @@ pub fn run() {
             Update,
             (
                 world_runtime_frame_counter_system,
-                camera_pan_system,
+                player_movement_system,
+                camera_follow_system,
                 active_area_chunk_request_system,
                 chunk_load_pump_system,
                 chunk_loaded_system,
@@ -70,6 +72,7 @@ pub fn run() {
 #[derive(Resource)]
 struct WorldSession {
     world_id: WorldId,
+    world_seed: u64,
     tick: u64,
 }
 
@@ -77,6 +80,7 @@ impl Default for WorldSession {
     fn default() -> Self {
         Self {
             world_id: WorldId::from("local-dev"),
+            world_seed: 1337,
             tick: 0,
         }
     }
@@ -152,11 +156,25 @@ impl Default for ChunkCacheConfig {
 }
 
 #[derive(Resource)]
+struct PlayerConfig {
+    move_speed: f32,
+    camera_follow_lerp: f32,
+}
+
+impl Default for PlayerConfig {
+    fn default() -> Self {
+        Self {
+            move_speed: 240.0,
+            camera_follow_lerp: 12.0,
+        }
+    }
+}
+
+#[derive(Resource)]
 struct WorldRenderConfig {
     tile_size: f32,
     active_radius_chunks: i32,
     layer: ChunkLayer,
-    camera_pan_speed: f32,
 }
 
 impl Default for WorldRenderConfig {
@@ -165,7 +183,6 @@ impl Default for WorldRenderConfig {
             tile_size: 16.0,
             active_radius_chunks: 2,
             layer: 0,
-            camera_pan_speed: 600.0,
         }
     }
 }
@@ -324,6 +341,9 @@ struct ChunkRenderTag;
 #[derive(Component)]
 struct WorldStatsText;
 
+#[derive(Component)]
+struct Player;
+
 #[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
@@ -347,8 +367,17 @@ impl Default for EvictionStats {
     }
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, config: Res<WorldRenderConfig>) {
     commands.spawn(Camera2d);
+    commands.spawn((
+        Sprite {
+            color: Color::srgb(0.95, 0.9, 0.2),
+            custom_size: Some(Vec2::splat(config.tile_size * 0.8)),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+        Player,
+    ));
     commands.spawn((
         Text::new("Storage: initializing"),
         TextFont {
@@ -385,11 +414,11 @@ fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
     runtime.advance_frame();
 }
 
-fn camera_pan_system(
+fn player_movement_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    config: Res<WorldRenderConfig>,
-    mut camera_query: Query<&mut Transform, With<Camera2d>>,
+    config: Res<PlayerConfig>,
+    mut player_query: Query<&mut Transform, With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -410,11 +439,30 @@ fn camera_pan_system(
         return;
     }
 
-    let delta = direction * config.camera_pan_speed * time.delta_secs();
-    for mut transform in &mut camera_query {
+    let delta = direction * config.move_speed * time.delta_secs();
+    for mut transform in &mut player_query {
         transform.translation.x += delta.x;
         transform.translation.y += delta.y;
     }
+}
+
+fn camera_follow_system(
+    time: Res<Time>,
+    config: Res<PlayerConfig>,
+    player_query: Query<&Transform, With<Player>>,
+    mut camera_query: Query<&mut Transform, (With<Camera2d>, Without<Player>)>,
+) {
+    let Ok(player_transform) = player_query.get_single() else {
+        return;
+    };
+    let Ok(mut camera_transform) = camera_query.get_single_mut() else {
+        return;
+    };
+
+    let mut target = player_transform.translation;
+    target.z = camera_transform.translation.z;
+    let t = 1.0 - (-config.camera_follow_lerp * time.delta_secs()).exp();
+    camera_transform.translation = camera_transform.translation.lerp(target, t);
 }
 
 fn active_area_chunk_request_system(
@@ -695,8 +743,12 @@ fn chunk_loaded_system(
         let data = match &event.data {
             Some(data) => data.clone(),
             None => {
-                let generated =
-                    generate_chunk_data(event.key.coord, event.key.layer, session.tick);
+                let generated = generate_chunk_data(
+                    event.key.coord,
+                    event.key.layer,
+                    session.world_seed,
+                    session.tick,
+                );
                 let mut queued = false;
                 if !runtime.queued_for_save.contains(&event.key) {
                     let view = SimChunkView::from_data(&generated);
@@ -869,16 +921,33 @@ fn world_stats_text_system(
     }
 }
 
-fn generate_chunk_data(coord: ChunkCoord, layer: ChunkLayer, saved_tick: u64) -> SimChunkData {
+fn generate_chunk_data(
+    coord: ChunkCoord,
+    layer: ChunkLayer,
+    world_seed: u64,
+    saved_tick: u64,
+) -> SimChunkData {
     let edge = CHUNK_EDGE as usize;
     let base_x = coord.cx * CHUNK_EDGE as i32;
     let base_y = coord.cy * CHUNK_EDGE as i32;
+    let seed = world_seed ^ (layer as u64).wrapping_mul(0x9e3779b97f4a7c15);
     let mut tiles = Vec::with_capacity(CHUNK_TILE_COUNT);
     for y in 0..edge {
         let gy = base_y + y as i32;
         for x in 0..edge {
             let gx = base_x + x as i32;
-            let tile = (((gx ^ gy) + layer as i32) & 7) as TileId;
+            let coarse_x = gx >> 3;
+            let coarse_y = gy >> 3;
+            let h = terrain_hash(coarse_x, coarse_y, seed);
+            let v = (h & 0xFFFF) as u16;
+            let variant = (terrain_hash(gx, gy, seed ^ 0x5bf03635f7d13d9b) >> 8) as u8;
+            let tile = if v < 5000 {
+                6
+            } else if v < 16000 {
+                4 + (variant % 2) as TileId
+            } else {
+                (variant % 4) as TileId
+            };
             tiles.push(tile);
         }
     }
@@ -927,31 +996,54 @@ fn build_chunk_image(data: &SimChunkData) -> Image {
 }
 
 fn chunk_pixels(data: &SimChunkData) -> Vec<u8> {
+    let edge = CHUNK_EDGE as usize;
     let mut pixels = Vec::with_capacity(CHUNK_TILE_COUNT * 4);
-    for tile in data.tiles.iter().take(CHUNK_TILE_COUNT) {
-        let color = tile_color(*tile);
-        pixels.extend_from_slice(&color);
-    }
-    if pixels.len() < CHUNK_TILE_COUNT * 4 {
-        let missing = CHUNK_TILE_COUNT - pixels.len() / 4;
-        for _ in 0..missing {
-            pixels.extend_from_slice(&tile_color(0));
+    let mut idx = 0usize;
+    for y in 0..edge {
+        for x in 0..edge {
+            let tile = data.tiles.get(idx).copied().unwrap_or(0);
+            let mut color = tile_color(tile);
+            if x == 0 || y == 0 {
+                color = darken_color(color);
+            }
+            pixels.extend_from_slice(&color);
+            idx += 1;
         }
     }
     pixels
 }
 
 fn tile_color(tile: TileId) -> [u8; 4] {
-    match tile % 8 {
-        0 => [28, 32, 34, 255],
-        1 => [63, 122, 84, 255],
-        2 => [76, 147, 197, 255],
-        3 => [186, 159, 97, 255],
-        4 => [154, 89, 91, 255],
-        5 => [102, 82, 125, 255],
-        6 => [128, 128, 128, 255],
-        _ => [206, 206, 206, 255],
+    match tile {
+        0 => [58, 123, 70, 255],
+        1 => [66, 132, 78, 255],
+        2 => [72, 140, 82, 255],
+        3 => [80, 148, 90, 255],
+        4 => [132, 96, 60, 255],
+        5 => [146, 106, 66, 255],
+        6 => [46, 92, 166, 255],
+        _ => [110, 110, 110, 255],
     }
+}
+
+fn darken_color(color: [u8; 4]) -> [u8; 4] {
+    let r = (color[0] as u16 * 4 / 5) as u8;
+    let g = (color[1] as u16 * 4 / 5) as u8;
+    let b = (color[2] as u16 * 4 / 5) as u8;
+    [r, g, b, color[3]]
+}
+
+fn terrain_hash(x: i32, y: i32, seed: u64) -> u32 {
+    let mut z = seed;
+    z ^= (x as i64 as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    z ^= (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f);
+    mix64(z) as u32
+}
+
+fn mix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
 }
 
 fn apply_recovery_report(status: &mut StorageStatus, report: &RecoveryReport) {
