@@ -176,6 +176,7 @@ struct WorldRenderConfig {
     tile_size: f32,
     active_radius_chunks: i32,
     layer: ChunkLayer,
+    show_chunk_borders: bool,
 }
 
 impl Default for WorldRenderConfig {
@@ -184,6 +185,7 @@ impl Default for WorldRenderConfig {
             tile_size: 16.0,
             active_radius_chunks: 2,
             layer: 0,
+            show_chunk_borders: false,
         }
     }
 }
@@ -798,7 +800,7 @@ fn chunk_loaded_system(
             continue;
         }
 
-        let texture_handle = images.add(build_chunk_image(&data));
+        let texture_handle = images.add(build_chunk_image(&data, &config));
         let chunk_size = chunk_world_size(&config);
         let center = chunk_center_world(data.coord, chunk_size);
         let entity = commands
@@ -1007,12 +1009,13 @@ fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
     )
 }
 
-fn build_chunk_image(data: &SimChunkData) -> Image {
-    let pixels = chunk_pixels(data);
+fn build_chunk_image(data: &SimChunkData, config: &WorldRenderConfig) -> Image {
+    let pixels = chunk_pixels(data, config);
+    let padded_edge = CHUNK_EDGE as u32 + 2;
     let mut image = Image::new_fill(
         Extent3d {
-            width: CHUNK_EDGE as u32,
-            height: CHUNK_EDGE as u32,
+            width: padded_edge,
+            height: padded_edge,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -1024,19 +1027,40 @@ fn build_chunk_image(data: &SimChunkData) -> Image {
     image
 }
 
-fn chunk_pixels(data: &SimChunkData) -> Vec<u8> {
+fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig) -> Vec<u8> {
     let edge = CHUNK_EDGE as usize;
-    let mut pixels = Vec::with_capacity(CHUNK_TILE_COUNT * 4);
-    let mut idx = 0usize;
-    for y in 0..edge {
-        for x in 0..edge {
+    let padded_edge = edge + 2;
+    let mut pixels = Vec::with_capacity(padded_edge * padded_edge * 4);
+
+    for oy in 0..padded_edge {
+        let ty = if oy == 0 {
+            0
+        } else if oy > edge {
+            edge - 1
+        } else {
+            oy - 1
+        };
+        let interior_y = oy as i32 - 1;
+        for ox in 0..padded_edge {
+            let tx = if ox == 0 {
+                0
+            } else if ox > edge {
+                edge - 1
+            } else {
+                ox - 1
+            };
+            let interior_x = ox as i32 - 1;
+            let idx = ty * edge + tx;
             let tile = data.tiles.get(idx).copied().unwrap_or(0);
             let mut color = tile_color(tile);
-            if x == 0 || y == 0 {
+            if config.show_chunk_borders
+                && interior_x >= 0
+                && interior_y >= 0
+                && (interior_x == 0 || interior_y == 0)
+            {
                 color = darken_color(color);
             }
             pixels.extend_from_slice(&color);
-            idx += 1;
         }
     }
     pixels
