@@ -4,6 +4,7 @@ use bevy::image::ImageSampler;
 use bevy::input::keyboard::KeyCode;
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
+use bevy::render::camera::Projection;
 use bevy::window::{Window, WindowPlugin};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -468,27 +469,40 @@ fn camera_follow_system(
 }
 
 fn active_area_chunk_request_system(
-    camera_query: Query<&Transform, With<Camera2d>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Transform, &Projection, &Camera), With<Camera2d>>,
     config: Res<WorldRenderConfig>,
     cache: Res<ChunkCacheConfig>,
     session: Res<WorldSession>,
     mut runtime: ResMut<WorldRuntime>,
     mut requests: EventWriter<ChunkLoadRequest>,
 ) {
-    let Ok(camera_transform) = camera_query.single() else {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok((camera_transform, projection, camera)) = camera_query.single() else {
         return;
     };
 
     let chunk_size = chunk_world_size(&config);
+    let viewport = camera
+        .logical_viewport_size()
+        .unwrap_or_else(|| Vec2::new(window.width(), window.height()));
+    let scale = match projection {
+        Projection::Orthographic(ortho) => ortho.scale,
+        _ => 1.0,
+    };
     let camera_pos = camera_transform.translation.truncate();
     let center_coord = world_to_chunk_coord(camera_pos, chunk_size);
-    let radius = config.active_radius_chunks;
-    let keep_radius = cache.keep_radius_chunks.max(radius);
+    let margin = config.active_radius_chunks.max(1);
+    let (rx, ry) = required_radius_chunks(viewport, scale, chunk_size, margin);
+    let keep_rx = (rx + cache.keep_radius_chunks).max(rx);
+    let keep_ry = (ry + cache.keep_radius_chunks).max(ry);
     let mut active_set = HashSet::new();
     let mut keep_set = HashSet::new();
 
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
+    for dy in -ry..=ry {
+        for dx in -rx..=rx {
             let coord = ChunkCoord::new(center_coord.cx + dx, center_coord.cy + dy);
             let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
             active_set.insert(key.clone());
@@ -499,8 +513,8 @@ fn active_area_chunk_request_system(
             }
         }
     }
-    for dy in -keep_radius..=keep_radius {
-        for dx in -keep_radius..=keep_radius {
+    for dy in -keep_ry..=keep_ry {
+        for dx in -keep_rx..=keep_rx {
             let coord = ChunkCoord::new(center_coord.cx + dx, center_coord.cy + dy);
             let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
             keep_set.insert(key);
@@ -964,6 +978,19 @@ fn generate_chunk_data(
 
 fn chunk_world_size(config: &WorldRenderConfig) -> f32 {
     config.tile_size * CHUNK_EDGE as f32
+}
+
+fn required_radius_chunks(
+    viewport: Vec2,
+    scale: f32,
+    chunk_size: f32,
+    margin: i32,
+) -> (i32, i32) {
+    let half_w = (viewport.x * 0.5) * scale;
+    let half_h = (viewport.y * 0.5) * scale;
+    let rx = (half_w / chunk_size).ceil() as i32 + margin;
+    let ry = (half_h / chunk_size).ceil() as i32 + margin;
+    (rx.max(0), ry.max(0))
 }
 
 fn world_to_chunk_coord(world_pos: Vec2, chunk_size: f32) -> ChunkCoord {
