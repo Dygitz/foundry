@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use bevy::input::keyboard::KeyCode;
+use bevy::input::ButtonInput;
 use bevy::prelude::*;
+use bevy::window::{Window, WindowPlugin};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task};
@@ -9,7 +12,7 @@ use persistence::{
     ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite, RecoveryReport,
     StorageError, WorldId, WorldStorage,
 };
-use simulation_core::{SimChunkData, TileId, CHUNK_EDGE, CHUNK_TILE_COUNT};
+use simulation_core::{SimChunkData, SimChunkView, TileId, CHUNK_EDGE, CHUNK_TILE_COUNT};
 use web_storage_indexeddb::IndexedDbStorage;
 
 pub fn run() {
@@ -26,7 +29,15 @@ pub fn run() {
         .insert_resource(RecoveryState::default())
         .add_event::<ChunkLoadRequest>()
         .add_event::<ChunkLoaded>()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    fit_canvas_to_parent: true,
+                    ..default()
+                }),
+                ..default()
+            }),
+        )
         .add_systems(Startup, (setup, init_storage))
         .add_systems(
             Update,
@@ -41,6 +52,7 @@ pub fn run() {
             Update,
             (
                 world_runtime_frame_counter_system,
+                camera_pan_system,
                 active_area_chunk_request_system,
                 chunk_load_pump_system,
                 chunk_loaded_system,
@@ -70,6 +82,7 @@ struct WorldRuntime {
     loaded: HashMap<ChunkKey, LoadedChunk>,
     dirty: HashSet<ChunkKey>,
     last_access_frame: HashMap<ChunkKey, u64>,
+    requested: HashSet<ChunkKey>,
     frame_counter: u64,
 }
 
@@ -118,6 +131,7 @@ struct WorldRenderConfig {
     tile_size: f32,
     active_radius_chunks: i32,
     layer: ChunkLayer,
+    camera_pan_speed: f32,
 }
 
 impl Default for WorldRenderConfig {
@@ -126,6 +140,7 @@ impl Default for WorldRenderConfig {
             tile_size: 16.0,
             active_radius_chunks: 2,
             layer: 0,
+            camera_pan_speed: 600.0,
         }
     }
 }
@@ -309,8 +324,40 @@ fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
     runtime.advance_frame();
 }
 
+fn camera_pan_system(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    config: Res<WorldRenderConfig>,
+    mut camera_query: Query<&mut Transform, With<Camera2d>>,
+) {
+    let mut direction = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        direction.y += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        direction.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        direction.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        direction.x += 1.0;
+    }
+
+    let direction = direction.normalize_or_zero();
+    if direction == Vec2::ZERO {
+        return;
+    }
+
+    let delta = direction * config.camera_pan_speed * time.delta_secs();
+    for mut transform in &mut camera_query {
+        transform.translation.x += delta.x;
+        transform.translation.y += delta.y;
+    }
+}
+
 fn active_area_chunk_request_system(
-    camera_query: Query<&GlobalTransform, With<Camera2d>>,
+    camera_query: Query<&Transform, With<Camera2d>>,
     config: Res<WorldRenderConfig>,
     session: Res<WorldSession>,
     mut runtime: ResMut<WorldRuntime>,
@@ -321,7 +368,7 @@ fn active_area_chunk_request_system(
     };
 
     let chunk_size = chunk_world_size(&config);
-    let camera_pos = camera_transform.translation().truncate();
+    let camera_pos = camera_transform.translation.truncate();
     let center_coord = world_to_chunk_coord(camera_pos, chunk_size);
     let radius = config.active_radius_chunks;
 
@@ -331,7 +378,7 @@ fn active_area_chunk_request_system(
             let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
             if runtime.ensure_loaded(&key) {
                 runtime.touch(&key);
-            } else {
+            } else if runtime.requested.insert(key.clone()) {
                 requests.write(ChunkLoadRequest { key });
             }
         }
@@ -483,6 +530,7 @@ fn chunk_load_pump_system(
     mut loaded: EventWriter<ChunkLoaded>,
     services: NonSend<StorageServices>,
     mut state: ResMut<ChunkLoadState>,
+    mut runtime: ResMut<WorldRuntime>,
     mut status: ResMut<StorageStatus>,
 ) {
     for request in requests.read() {
@@ -544,6 +592,7 @@ fn chunk_load_pump_system(
     }
     for key in completed_keys {
         state.in_flight.remove(&key);
+        runtime.requested.remove(&key);
     }
     state.tasks = remaining;
 }
@@ -554,11 +603,35 @@ fn chunk_loaded_system(
     mut loaded_events: EventReader<ChunkLoaded>,
     mut images: ResMut<Assets<Image>>,
     config: Res<WorldRenderConfig>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
 ) {
     for event in loaded_events.read() {
         let data = match &event.data {
             Some(data) => data.clone(),
-            None => empty_chunk_data(event.key.coord, event.key.layer),
+            None => {
+                let generated =
+                    generate_chunk_data(event.key.coord, event.key.layer, session.tick);
+                let view = SimChunkView::from_data(&generated);
+                match services.codec.encode(&view, session.tick) {
+                    Ok(blob) => {
+                        let updated_at_ms = time.elapsed().as_millis() as u64;
+                        queue.pending.push_back(ChunkRecordWrite {
+                            key: event.key.clone(),
+                            blob,
+                            tick_saved: session.tick,
+                            checksum: 0,
+                            updated_at_ms,
+                        });
+                        runtime.mark_dirty(event.key.clone());
+                    }
+                    Err(error) => status.record_error(&error),
+                }
+                generated
+            }
         };
 
         if let Some(existing) = runtime.loaded.get_mut(&event.key) {
@@ -608,13 +681,25 @@ fn storage_status_text_system(
     }
 }
 
-fn empty_chunk_data(coord: ChunkCoord, layer: ChunkLayer) -> SimChunkData {
+fn generate_chunk_data(coord: ChunkCoord, layer: ChunkLayer, saved_tick: u64) -> SimChunkData {
+    let edge = CHUNK_EDGE as usize;
+    let base_x = coord.cx * CHUNK_EDGE as i32;
+    let base_y = coord.cy * CHUNK_EDGE as i32;
+    let mut tiles = Vec::with_capacity(CHUNK_TILE_COUNT);
+    for y in 0..edge {
+        let gy = base_y + y as i32;
+        for x in 0..edge {
+            let gx = base_x + x as i32;
+            let tile = (((gx ^ gy) + layer as i32) & 7) as TileId;
+            tiles.push(tile);
+        }
+    }
     SimChunkData {
         coord,
         layer,
-        tiles: vec![0; CHUNK_TILE_COUNT],
+        tiles,
         entities: Vec::new(),
-        saved_tick: 0,
+        saved_tick,
     }
 }
 
