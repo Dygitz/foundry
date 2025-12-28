@@ -568,6 +568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_frontend"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "persistence",
+ "simulation_core",
+ "web_storage_indexeddb",
+]
+
+[[package]]
 name = "bevy_gilrs"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2085,8 +2095,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 name = "foundry"
 version = "0.1.0"
 dependencies = [
- "bevy",
- "idb",
+ "bevy_frontend",
 ]
 
 [[package]]
@@ -3297,6 +3306,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "persistence"
+version = "0.1.0"
+dependencies = [
+ "simulation_core",
+]
+
+[[package]]
 name = "petgraph"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3805,6 +3821,10 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "simulation_core"
+version = "0.1.0"
 
 [[package]]
 name = "skrifa"
@@ -4417,6 +4437,14 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web_storage_indexeddb"
+version = "0.1.0"
+dependencies = [
+ "idb",
+ "persistence",
 ]
 
 [[package]]

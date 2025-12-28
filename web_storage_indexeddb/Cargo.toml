@@ -1,0 +1,8 @@
+[package]
+name = "web_storage_indexeddb"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+persistence = { path = "../persistence" }
+idb = "0.6.4"

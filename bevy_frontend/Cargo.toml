@@ -1,0 +1,14 @@
+[package]
+name = "bevy_frontend"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "foundry"
+path = "src/main.rs"
+
+[dependencies]
+bevy = "0.16.1"
+simulation_core = { path = "../simulation_core" }
+persistence = { path = "../persistence" }
+web_storage_indexeddb = { path = "../web_storage_indexeddb" }

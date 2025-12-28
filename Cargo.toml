@@ -3,6 +3,14 @@ name = "foundry"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    "simulation_core",
+    "persistence",
+    "web_storage_indexeddb",
+    "bevy_frontend",
+]
+
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
@@ -22,7 +30,5 @@ inherits = "release"
 opt-level = "s"
 strip = "debuginfo"
 
-
 [dependencies]
-bevy = "0.16.1"
-idb = "0.6.4"
+bevy_frontend = { path = "bevy_frontend" }
