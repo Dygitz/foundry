@@ -11,6 +11,17 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# Enable more optimization in the release profile at the cost of compile time.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+# Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
+
 
 [dependencies]
 bevy = "0.16.1"
