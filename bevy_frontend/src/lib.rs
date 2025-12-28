@@ -1,13 +1,15 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::tasks::futures_lite::future;
 use persistence::{
-    ChunkCodec, ChunkCodecV1, ChunkKey, ChunkRecordWrite, RecoveryReport, StorageError, WorldId,
-    WorldStorage,
+    ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite, RecoveryReport,
+    StorageError, WorldId, WorldStorage,
 };
-use simulation_core::SimChunkData;
+use simulation_core::{SimChunkData, TileId, CHUNK_EDGE, CHUNK_TILE_COUNT};
 use web_storage_indexeddb::IndexedDbStorage;
 
 pub fn run() {
@@ -16,6 +18,8 @@ pub fn run() {
         .insert_resource(StorageConfig::default())
         .insert_resource(StorageStatus::default())
         .insert_resource(WorldSession::default())
+        .insert_resource(WorldRenderConfig::default())
+        .insert_resource(WorldRuntime::default())
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
         .insert_resource(ChunkLoadState::default())
@@ -30,9 +34,18 @@ pub fn run() {
                 storage_init_pump_system,
                 storage_recovery_pump_system,
                 autosave_flush_system,
-                chunk_load_pump_system,
                 storage_status_text_system,
             ),
+        )
+        .add_systems(
+            Update,
+            (
+                world_runtime_frame_counter_system,
+                active_area_chunk_request_system,
+                chunk_load_pump_system,
+                chunk_loaded_system,
+            )
+                .chain(),
         )
         .run();
 }
@@ -48,6 +61,71 @@ impl Default for WorldSession {
         Self {
             world_id: WorldId::from("local-dev"),
             tick: 0,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct WorldRuntime {
+    loaded: HashMap<ChunkKey, LoadedChunk>,
+    dirty: HashSet<ChunkKey>,
+    last_access_frame: HashMap<ChunkKey, u64>,
+    frame_counter: u64,
+}
+
+impl WorldRuntime {
+    fn advance_frame(&mut self) {
+        self.frame_counter = self.frame_counter.saturating_add(1);
+    }
+
+    fn ensure_loaded(&self, key: &ChunkKey) -> bool {
+        self.loaded.contains_key(key)
+    }
+
+    fn mark_dirty(&mut self, key: ChunkKey) {
+        self.dirty.insert(key.clone());
+        self.touch(&key);
+    }
+
+    fn touch(&mut self, key: &ChunkKey) {
+        self.last_access_frame.insert(key.clone(), self.frame_counter);
+    }
+
+    fn evictable_candidates(&self) -> Vec<ChunkKey> {
+        let mut entries: Vec<(u64, ChunkKey)> = self
+            .loaded
+            .keys()
+            .map(|key| {
+                (
+                    self.last_access_frame.get(key).copied().unwrap_or(0),
+                    key.clone(),
+                )
+            })
+            .collect();
+        entries.sort_by_key(|(frame, _)| *frame);
+        entries.into_iter().map(|(_, key)| key).collect()
+    }
+}
+
+struct LoadedChunk {
+    data: SimChunkData,
+    sprite_entity: Entity,
+    texture_handle: Handle<Image>,
+}
+
+#[derive(Resource)]
+struct WorldRenderConfig {
+    tile_size: f32,
+    active_radius_chunks: i32,
+    layer: ChunkLayer,
+}
+
+impl Default for WorldRenderConfig {
+    fn default() -> Self {
+        Self {
+            tile_size: 16.0,
+            active_radius_chunks: 2,
+            layer: 0,
         }
     }
 }
@@ -199,6 +277,9 @@ impl Default for ChunkLoadState {
 #[derive(Component)]
 struct StorageStatusText;
 
+#[derive(Component)]
+struct ChunkRenderTag;
+
 #[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
@@ -222,6 +303,39 @@ fn setup(mut commands: Commands) {
         },
         StorageStatusText,
     ));
+}
+
+fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
+    runtime.advance_frame();
+}
+
+fn active_area_chunk_request_system(
+    camera_query: Query<&GlobalTransform, With<Camera2d>>,
+    config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut requests: EventWriter<ChunkLoadRequest>,
+) {
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+
+    let chunk_size = chunk_world_size(&config);
+    let camera_pos = camera_transform.translation().truncate();
+    let center_coord = world_to_chunk_coord(camera_pos, chunk_size);
+    let radius = config.active_radius_chunks;
+
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let coord = ChunkCoord::new(center_coord.cx + dx, center_coord.cy + dy);
+            let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+            if runtime.ensure_loaded(&key) {
+                runtime.touch(&key);
+            } else {
+                requests.write(ChunkLoadRequest { key });
+            }
+        }
+    }
 }
 
 fn init_storage(world: &mut World) {
@@ -434,6 +548,53 @@ fn chunk_load_pump_system(
     state.tasks = remaining;
 }
 
+fn chunk_loaded_system(
+    mut commands: Commands,
+    mut runtime: ResMut<WorldRuntime>,
+    mut loaded_events: EventReader<ChunkLoaded>,
+    mut images: ResMut<Assets<Image>>,
+    config: Res<WorldRenderConfig>,
+) {
+    for event in loaded_events.read() {
+        let data = match &event.data {
+            Some(data) => data.clone(),
+            None => empty_chunk_data(event.key.coord, event.key.layer),
+        };
+
+        if let Some(existing) = runtime.loaded.get_mut(&event.key) {
+            existing.data = data;
+            runtime.touch(&event.key);
+            // Texture refresh will use existing.texture_handle once chunk diffing is wired up.
+            continue;
+        }
+
+        let texture_handle = images.add(build_chunk_image(&data));
+        let chunk_size = chunk_world_size(&config);
+        let center = chunk_center_world(data.coord, chunk_size);
+        let entity = commands
+            .spawn((
+                Sprite {
+                    image: texture_handle.clone(),
+                    custom_size: Some(Vec2::splat(chunk_size)),
+                    ..default()
+                },
+                Transform::from_translation(Vec3::new(center.x, center.y, 0.0)),
+                ChunkRenderTag,
+            ))
+            .id();
+
+        runtime.loaded.insert(
+            event.key.clone(),
+            LoadedChunk {
+                data,
+                sprite_entity: entity,
+                texture_handle,
+            },
+        );
+        runtime.touch(&event.key);
+    }
+}
+
 fn storage_status_text_system(
     status: Res<StorageStatus>,
     mut query: Query<&mut Text, With<StorageStatusText>>,
@@ -444,6 +605,77 @@ fn storage_status_text_system(
     let label = status.label();
     for mut text in &mut query {
         *text = Text::new(label.clone());
+    }
+}
+
+fn empty_chunk_data(coord: ChunkCoord, layer: ChunkLayer) -> SimChunkData {
+    SimChunkData {
+        coord,
+        layer,
+        tiles: vec![0; CHUNK_TILE_COUNT],
+        entities: Vec::new(),
+        saved_tick: 0,
+    }
+}
+
+fn chunk_world_size(config: &WorldRenderConfig) -> f32 {
+    config.tile_size * CHUNK_EDGE as f32
+}
+
+fn world_to_chunk_coord(world_pos: Vec2, chunk_size: f32) -> ChunkCoord {
+    ChunkCoord::new(
+        (world_pos.x / chunk_size).floor() as i32,
+        (world_pos.y / chunk_size).floor() as i32,
+    )
+}
+
+fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
+    Vec2::new(
+        (coord.cx as f32 + 0.5) * chunk_size,
+        (coord.cy as f32 + 0.5) * chunk_size,
+    )
+}
+
+fn build_chunk_image(data: &SimChunkData) -> Image {
+    let pixels = chunk_pixels(data);
+    Image::new_fill(
+        Extent3d {
+            width: CHUNK_EDGE as u32,
+            height: CHUNK_EDGE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    )
+}
+
+fn chunk_pixels(data: &SimChunkData) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(CHUNK_TILE_COUNT * 4);
+    for tile in data.tiles.iter().take(CHUNK_TILE_COUNT) {
+        let color = tile_color(*tile);
+        pixels.extend_from_slice(&color);
+    }
+    if pixels.len() < CHUNK_TILE_COUNT * 4 {
+        let missing = CHUNK_TILE_COUNT - pixels.len() / 4;
+        for _ in 0..missing {
+            pixels.extend_from_slice(&tile_color(0));
+        }
+    }
+    pixels
+}
+
+fn tile_color(tile: TileId) -> [u8; 4] {
+    match tile % 8 {
+        0 => [28, 32, 34, 255],
+        1 => [63, 122, 84, 255],
+        2 => [76, 147, 197, 255],
+        3 => [186, 159, 97, 255],
+        4 => [154, 89, 91, 255],
+        5 => [102, 82, 125, 255],
+        6 => [128, 128, 128, 255],
+        _ => [206, 206, 206, 255],
     }
 }
 
