@@ -59,6 +59,7 @@ pub fn run() {
             (
                 world_runtime_frame_counter_system,
                 player_movement_system,
+                player_visual_system,
                 camera_follow_system,
                 camera_zoom_system,
                 active_area_chunk_request_system,
@@ -352,6 +353,14 @@ struct Player;
 #[derive(Component, Copy, Clone)]
 struct Velocity(Vec2);
 
+#[derive(Component, Copy, Clone)]
+enum Facing {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 #[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
@@ -375,20 +384,26 @@ impl Default for EvictionStats {
     }
 }
 
-fn setup(mut commands: Commands, config: Res<WorldRenderConfig>) {
+fn setup(
+    mut commands: Commands,
+    config: Res<WorldRenderConfig>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let mut camera = commands.spawn(Camera2d);
     camera.insert(Projection::Orthographic(OrthographicProjection {
         scale: 0.35,
         ..OrthographicProjection::default_2d()
     }));
+    let player_texture = images.add(build_player_image());
     commands.spawn((
         Sprite {
-            color: Color::srgb(0.95, 0.9, 0.2),
+            image: player_texture,
             custom_size: Some(Vec2::splat(config.tile_size * 0.95)),
             ..default()
         },
         Transform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
         Velocity(Vec2::ZERO),
+        Facing::Down,
         Player,
     ));
     commands.spawn((
@@ -431,7 +446,7 @@ fn player_movement_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<PlayerConfig>,
-    mut player_query: Query<(&mut Transform, &mut Velocity), With<Player>>,
+    mut player_query: Query<(&mut Transform, &mut Velocity, &mut Facing), With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -447,13 +462,39 @@ fn player_movement_system(
         direction.x += 1.0;
     }
 
+    let raw_direction = direction;
     let direction = direction.normalize_or_zero();
     let velocity = Velocity(direction * config.move_speed);
     let delta = velocity.0 * time.delta_secs();
-    for (mut transform, mut current_velocity) in &mut player_query {
+    for (mut transform, mut current_velocity, mut facing) in &mut player_query {
         *current_velocity = velocity;
         transform.translation.x += delta.x;
         transform.translation.y += delta.y;
+        if raw_direction != Vec2::ZERO {
+            if raw_direction.x.abs() >= raw_direction.y.abs() {
+                *facing = if raw_direction.x > 0.0 {
+                    Facing::Right
+                } else {
+                    Facing::Left
+                };
+            } else {
+                *facing = if raw_direction.y > 0.0 {
+                    Facing::Up
+                } else {
+                    Facing::Down
+                };
+            }
+        }
+    }
+}
+
+fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Player>>) {
+    for (facing, mut sprite) in &mut player_query {
+        match facing {
+            Facing::Left => sprite.flip_x = true,
+            Facing::Right => sprite.flip_x = false,
+            Facing::Up | Facing::Down => {}
+        }
     }
 }
 
@@ -1034,6 +1075,75 @@ fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
         (coord.cx as f32 + 0.5) * chunk_size,
         (coord.cy as f32 + 0.5) * chunk_size,
     )
+}
+
+fn build_player_image() -> Image {
+    let size = 16usize;
+    let mut filled = vec![false; size * size];
+
+    let mut fill_rect = |x0: usize, y0: usize, x1: usize, y1: usize| {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                filled[y * size + x] = true;
+            }
+        }
+    };
+
+    fill_rect(5, 2, 10, 5); // head
+    fill_rect(4, 6, 11, 11); // body
+    fill_rect(4, 12, 6, 13); // left foot
+    fill_rect(9, 12, 11, 13); // right foot
+
+    let is_filled = |x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 {
+            return false;
+        }
+        filled[y as usize * size + x as usize]
+    };
+
+    let is_foot = |x: usize, y: usize| {
+        (y >= 12 && y <= 13) && ((x >= 4 && x <= 6) || (x >= 9 && x <= 11))
+    };
+
+    let outline_color = [28, 22, 18, 255];
+    let body_color = [226, 205, 124, 255];
+    let foot_color = [190, 168, 96, 255];
+    let mut pixels = Vec::with_capacity(size * size * 4);
+
+    for y in 0..size {
+        for x in 0..size {
+            if !filled[y * size + x] {
+                pixels.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let outline = !is_filled(x as i32 - 1, y as i32)
+                || !is_filled(x as i32 + 1, y as i32)
+                || !is_filled(x as i32, y as i32 - 1)
+                || !is_filled(x as i32, y as i32 + 1);
+            let color = if outline {
+                outline_color
+            } else if is_foot(x, y) {
+                foot_color
+            } else {
+                body_color
+            };
+            pixels.extend_from_slice(&color);
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: size as u32,
+            height: size as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    );
+    image.sampler = ImageSampler::nearest();
+    image
 }
 
 fn build_chunk_image(
