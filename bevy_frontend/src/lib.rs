@@ -4,7 +4,8 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::tasks::futures_lite::future;
 use persistence::{
-    ChunkCodec, ChunkCodecV1, ChunkKey, ChunkRecordWrite, StorageError, WorldId, WorldStorage,
+    ChunkCodec, ChunkCodecV1, ChunkKey, ChunkRecordWrite, RecoveryReport, StorageError, WorldId,
+    WorldStorage,
 };
 use simulation_core::SimChunkData;
 use web_storage_indexeddb::IndexedDbStorage;
@@ -18,6 +19,7 @@ pub fn run() {
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
         .insert_resource(ChunkLoadState::default())
+        .insert_resource(RecoveryState::default())
         .add_event::<ChunkLoadRequest>()
         .add_event::<ChunkLoaded>()
         .add_plugins(DefaultPlugins)
@@ -26,6 +28,7 @@ pub fn run() {
             Update,
             (
                 storage_init_pump_system,
+                storage_recovery_pump_system,
                 autosave_flush_system,
                 chunk_load_pump_system,
                 storage_status_text_system,
@@ -97,11 +100,14 @@ impl StorageStatus {
     }
 
     fn record_error(&mut self, error: &StorageError) {
+        if matches!(error, StorageError::QuotaExceeded) {
+            self.state = StorageState::Paused;
+            self.detail = Some("storage quota exceeded (autosave paused)".to_string());
+            return;
+        }
+
         self.detail = Some(error.to_string());
-        self.state = match error {
-            StorageError::QuotaExceeded => StorageState::Paused,
-            _ => StorageState::Degraded,
-        };
+        self.state = StorageState::Degraded;
     }
 
     fn label(&self) -> String {
@@ -125,13 +131,14 @@ struct StorageServices {
 #[derive(Resource, Default)]
 struct StorageInitTask {
     task: Option<Task<Result<(), StorageError>>>,
+    ready: bool,
 }
 
 #[derive(Resource)]
 struct AutosaveState {
     timer: Timer,
     max_per_flush: usize,
-    in_flight: Option<Task<Result<(), StorageError>>>,
+    in_flight: Option<SaveTask>,
 }
 
 impl Default for AutosaveState {
@@ -142,6 +149,11 @@ impl Default for AutosaveState {
             in_flight: None,
         }
     }
+}
+
+struct SaveTask {
+    task: Task<Result<(), StorageError>>,
+    pending_count: usize,
 }
 
 #[derive(Resource, Default)]
@@ -187,6 +199,12 @@ impl Default for ChunkLoadState {
 #[derive(Component)]
 struct StorageStatusText;
 
+#[derive(Resource, Default)]
+struct RecoveryState {
+    task: Option<Task<Result<RecoveryReport, StorageError>>>,
+    completed: bool,
+}
+
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
     commands.spawn((
@@ -224,23 +242,59 @@ fn init_storage(world: &mut World) {
     });
 
     world.insert_non_send_resource(StorageServices { storage, codec });
-    world.insert_resource(StorageInitTask { task: Some(task) });
+    world.insert_resource(StorageInitTask {
+        task: Some(task),
+        ready: false,
+    });
 }
 
 fn storage_init_pump_system(
     mut init_task: ResMut<StorageInitTask>,
     mut status: ResMut<StorageStatus>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut recovery: ResMut<RecoveryState>,
 ) {
-    let Some(task) = init_task.task.as_mut() else {
+    if let Some(task) = init_task.task.as_mut() {
+        if let Some(result) = future::block_on(future::poll_once(task)) {
+            match result {
+                Ok(()) => {
+                    status.mark_ok();
+                    init_task.ready = true;
+                }
+                Err(error) => status.record_error(&error),
+            }
+            init_task.task = None;
+        }
+    }
+
+    if init_task.ready && recovery.task.is_none() && !recovery.completed {
+        let storage = services.storage.clone();
+        let world_id = session.world_id.clone();
+        let task = AsyncComputeTaskPool::get().spawn_local(async move {
+            storage.recover_incomplete_savepoints(&world_id).await
+        });
+        recovery.task = Some(task);
+    }
+}
+
+fn storage_recovery_pump_system(
+    mut recovery: ResMut<RecoveryState>,
+    mut status: ResMut<StorageStatus>,
+) {
+    let Some(task) = recovery.task.as_mut() else {
         return;
     };
 
     if let Some(result) = future::block_on(future::poll_once(task)) {
         match result {
-            Ok(()) => status.mark_ok(),
+            Ok(report) => {
+                apply_recovery_report(&mut status, &report);
+                recovery.completed = true;
+            }
             Err(error) => status.record_error(&error),
         }
-        init_task.task = None;
+        recovery.task = None;
     }
 }
 
@@ -254,13 +308,22 @@ fn autosave_flush_system(
 ) {
     state.timer.tick(time.delta());
 
-    if let Some(task) = state.in_flight.as_mut() {
-        if let Some(result) = future::block_on(future::poll_once(task)) {
+    if let Some(mut save_task) = state.in_flight.take() {
+        if let Some(result) = future::block_on(future::poll_once(&mut save_task.task)) {
             match result {
-                Ok(()) => status.mark_ok(),
-                Err(error) => status.record_error(&error),
+                Ok(()) => {
+                    for _ in 0..save_task.pending_count {
+                        queue.pending.pop_front();
+                    }
+                    status.mark_ok();
+                }
+                Err(error) => {
+                    status.record_error(&error);
+                }
             }
-            state.in_flight = None;
+        } else {
+            state.in_flight = Some(save_task);
+            return;
         }
     }
 
@@ -272,21 +335,33 @@ fn autosave_flush_system(
         return;
     }
 
-    let mut batch = Vec::new();
-    for _ in 0..state.max_per_flush {
-        if let Some(record) = queue.pending.pop_front() {
-            batch.push(record);
-        } else {
-            break;
-        }
+    let batch: Vec<ChunkRecordWrite> = queue
+        .pending
+        .iter()
+        .take(state.max_per_flush)
+        .cloned()
+        .collect();
+    let pending_count = batch.len();
+    if pending_count == 0 {
+        return;
     }
 
     let storage = services.storage.clone();
     let world_id = session.world_id.clone();
+    let tick = session.tick;
     let task = AsyncComputeTaskPool::get().spawn_local(async move {
-        storage.put_chunks(&world_id, batch).await
+        let chunk_keys = batch.iter().map(|record| record.key.clone()).collect();
+        let savepoint_id = storage
+            .begin_savepoint(&world_id, tick, chunk_keys)
+            .await?;
+        storage.put_chunks(&world_id, batch).await?;
+        storage.commit_savepoint(&savepoint_id).await?;
+        Ok(())
     });
-    state.in_flight = Some(task);
+    state.in_flight = Some(SaveTask {
+        task,
+        pending_count,
+    });
 }
 
 fn chunk_load_pump_system(
@@ -369,5 +444,20 @@ fn storage_status_text_system(
     let label = status.label();
     for mut text in &mut query {
         *text = Text::new(label.clone());
+    }
+}
+
+fn apply_recovery_report(status: &mut StorageStatus, report: &RecoveryReport) {
+    if report.incomplete_savepoints.is_empty() {
+        status.mark_ok();
+        return;
+    }
+
+    if status.state != StorageState::Paused {
+        status.state = StorageState::Healthy;
+        status.detail = Some(format!(
+            "ignored {} incomplete savepoints",
+            report.incomplete_savepoints.len()
+        ));
     }
 }
