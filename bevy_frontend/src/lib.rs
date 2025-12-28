@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::image::ImageSampler;
 use bevy::input::keyboard::KeyCode;
+use bevy::input::mouse::MouseWheel;
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
-use bevy::render::camera::Projection;
+use bevy::render::camera::{OrthographicProjection, Projection};
 use bevy::window::{Window, WindowPlugin};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -59,6 +60,7 @@ pub fn run() {
                 world_runtime_frame_counter_system,
                 player_movement_system,
                 camera_follow_system,
+                camera_zoom_system,
                 active_area_chunk_request_system,
                 chunk_load_pump_system,
                 chunk_loaded_system,
@@ -150,7 +152,7 @@ impl Default for ChunkCacheConfig {
     fn default() -> Self {
         Self {
             max_loaded_chunks: 512,
-            keep_radius_chunks: 4,
+            keep_radius_chunks: 6,
             evict_per_frame: 8,
         }
     }
@@ -165,7 +167,7 @@ struct PlayerConfig {
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
-            move_speed: 240.0,
+            move_speed: 160.0,
             camera_follow_lerp: 12.0,
         }
     }
@@ -183,7 +185,7 @@ impl Default for WorldRenderConfig {
     fn default() -> Self {
         Self {
             tile_size: 16.0,
-            active_radius_chunks: 2,
+            active_radius_chunks: 3,
             layer: 0,
             show_chunk_borders: false,
         }
@@ -374,11 +376,15 @@ impl Default for EvictionStats {
 }
 
 fn setup(mut commands: Commands, config: Res<WorldRenderConfig>) {
-    commands.spawn(Camera2d);
+    let mut camera = commands.spawn(Camera2d);
+    camera.insert(Projection::Orthographic(OrthographicProjection {
+        scale: 0.35,
+        ..OrthographicProjection::default_2d()
+    }));
     commands.spawn((
         Sprite {
             color: Color::srgb(0.95, 0.9, 0.2),
-            custom_size: Some(Vec2::splat(config.tile_size * 0.8)),
+            custom_size: Some(Vec2::splat(config.tile_size * 0.95)),
             ..default()
         },
         Transform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
@@ -468,6 +474,23 @@ fn camera_follow_system(
     target.z = camera_transform.translation.z;
     let t = 1.0 - (-config.camera_follow_lerp * time.delta_secs()).exp();
     camera_transform.translation = camera_transform.translation.lerp(target, t);
+}
+
+fn camera_zoom_system(
+    mut scroll: EventReader<MouseWheel>,
+    mut camera_query: Query<&mut Projection, With<Camera2d>>,
+) {
+    let Ok(mut projection) = camera_query.single_mut() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = &mut *projection else {
+        return;
+    };
+
+    for ev in scroll.read() {
+        let factor = (1.0 - ev.y * 0.1).clamp(0.7, 1.3);
+        ortho.scale = (ortho.scale * factor).clamp(0.25, 0.9);
+    }
 }
 
 fn active_area_chunk_request_system(
@@ -968,8 +991,8 @@ fn generate_chunk_data(
 
 fn terrain_tile_id(gx: i32, gy: i32, layer: ChunkLayer, world_seed: u64) -> TileId {
     let seed = world_seed ^ (layer as u64).wrapping_mul(0x9e3779b97f4a7c15);
-    let coarse_x = gx >> 3;
-    let coarse_y = gy >> 3;
+    let coarse_x = gx >> 4;
+    let coarse_y = gy >> 4;
     let h = terrain_hash(coarse_x, coarse_y, seed);
     let v = (h & 0xFFFF) as u16;
     let variant = (terrain_hash(gx, gy, seed ^ 0x5bf03635f7d13d9b) >> 8) as u8;
