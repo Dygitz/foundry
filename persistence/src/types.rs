@@ -1,5 +1,7 @@
 use std::fmt;
 
+pub use simulation_core::{ChunkCoord, ChunkLayer};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorldId(String);
 
@@ -30,20 +32,6 @@ impl From<&str> for WorldId {
         Self(value.to_string())
     }
 }
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct ChunkCoord {
-    pub cx: i32,
-    pub cy: i32,
-}
-
-impl ChunkCoord {
-    pub fn new(cx: i32, cy: i32) -> Self {
-        Self { cx, cy }
-    }
-}
-
-pub type ChunkLayer = u8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
