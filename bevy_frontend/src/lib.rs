@@ -344,6 +344,9 @@ struct WorldStatsText;
 #[derive(Component)]
 struct Player;
 
+#[derive(Component, Copy, Clone)]
+struct Velocity(Vec2);
+
 #[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
@@ -376,6 +379,7 @@ fn setup(mut commands: Commands, config: Res<WorldRenderConfig>) {
             ..default()
         },
         Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+        Velocity(Vec2::ZERO),
         Player,
     ));
     commands.spawn((
@@ -418,7 +422,7 @@ fn player_movement_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<PlayerConfig>,
-    mut player_query: Query<&mut Transform, With<Player>>,
+    mut player_query: Query<(&mut Transform, &mut Velocity), With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -435,12 +439,10 @@ fn player_movement_system(
     }
 
     let direction = direction.normalize_or_zero();
-    if direction == Vec2::ZERO {
-        return;
-    }
-
-    let delta = direction * config.move_speed * time.delta_secs();
-    for mut transform in &mut player_query {
+    let velocity = Velocity(direction * config.move_speed);
+    let delta = velocity.0 * time.delta_secs();
+    for (mut transform, mut current_velocity) in &mut player_query {
+        *current_velocity = velocity;
         transform.translation.x += delta.x;
         transform.translation.y += delta.y;
     }
@@ -452,10 +454,10 @@ fn camera_follow_system(
     player_query: Query<&Transform, With<Player>>,
     mut camera_query: Query<&mut Transform, (With<Camera2d>, Without<Player>)>,
 ) {
-    let Ok(player_transform) = player_query.get_single() else {
+    let Ok(player_transform) = player_query.single() else {
         return;
     };
-    let Ok(mut camera_transform) = camera_query.get_single_mut() else {
+    let Ok(mut camera_transform) = camera_query.single_mut() else {
         return;
     };
 
@@ -875,7 +877,7 @@ fn chunk_eviction_system(
             }
 
             if let Some(loaded) = runtime.loaded.remove(&key) {
-                commands.entity(loaded.sprite_entity).despawn_recursive();
+                commands.entity(loaded.sprite_entity).despawn();
             }
             runtime.last_access_frame.remove(&key);
             evicted += 1;
