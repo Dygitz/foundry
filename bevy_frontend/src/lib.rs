@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use bevy::image::ImageSampler;
 use bevy::input::keyboard::KeyCode;
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
@@ -23,6 +24,8 @@ pub fn run() {
         .insert_resource(WorldSession::default())
         .insert_resource(WorldRenderConfig::default())
         .insert_resource(WorldRuntime::default())
+        .insert_resource(ChunkCacheConfig::default())
+        .insert_resource(EvictionStats::default())
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
         .insert_resource(ChunkLoadState::default())
@@ -56,6 +59,8 @@ pub fn run() {
                 active_area_chunk_request_system,
                 chunk_load_pump_system,
                 chunk_loaded_system,
+                chunk_eviction_system,
+                world_stats_text_system,
             )
                 .chain(),
         )
@@ -82,7 +87,10 @@ struct WorldRuntime {
     loaded: HashMap<ChunkKey, LoadedChunk>,
     dirty: HashSet<ChunkKey>,
     last_access_frame: HashMap<ChunkKey, u64>,
+    queued_for_save: HashSet<ChunkKey>,
     requested: HashSet<ChunkKey>,
+    active_set: HashSet<ChunkKey>,
+    keep_set: HashSet<ChunkKey>,
     frame_counter: u64,
 }
 
@@ -124,6 +132,23 @@ struct LoadedChunk {
     data: SimChunkData,
     sprite_entity: Entity,
     texture_handle: Handle<Image>,
+}
+
+#[derive(Resource)]
+struct ChunkCacheConfig {
+    max_loaded_chunks: usize,
+    keep_radius_chunks: i32,
+    evict_per_frame: usize,
+}
+
+impl Default for ChunkCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_loaded_chunks: 512,
+            keep_radius_chunks: 4,
+            evict_per_frame: 8,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -247,6 +272,7 @@ impl Default for AutosaveState {
 struct SaveTask {
     task: Task<Result<(), StorageError>>,
     pending_count: usize,
+    keys: Vec<ChunkKey>,
 }
 
 #[derive(Resource, Default)]
@@ -295,10 +321,30 @@ struct StorageStatusText;
 #[derive(Component)]
 struct ChunkRenderTag;
 
+#[derive(Component)]
+struct WorldStatsText;
+
 #[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
     completed: bool,
+}
+
+#[derive(Resource)]
+struct EvictionStats {
+    timer: Timer,
+    evicted_this_window: usize,
+    evicted_per_second: usize,
+}
+
+impl Default for EvictionStats {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            evicted_this_window: 0,
+            evicted_per_second: 0,
+        }
+    }
 }
 
 fn setup(mut commands: Commands) {
@@ -317,6 +363,21 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         StorageStatusText,
+    ));
+    commands.spawn((
+        Text::new("Chunks: 0 | Dirty: 0 | Evict/s: 0"),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(32.0),
+            ..default()
+        },
+        WorldStatsText,
     ));
 }
 
@@ -359,6 +420,7 @@ fn camera_pan_system(
 fn active_area_chunk_request_system(
     camera_query: Query<&Transform, With<Camera2d>>,
     config: Res<WorldRenderConfig>,
+    cache: Res<ChunkCacheConfig>,
     session: Res<WorldSession>,
     mut runtime: ResMut<WorldRuntime>,
     mut requests: EventWriter<ChunkLoadRequest>,
@@ -371,11 +433,15 @@ fn active_area_chunk_request_system(
     let camera_pos = camera_transform.translation.truncate();
     let center_coord = world_to_chunk_coord(camera_pos, chunk_size);
     let radius = config.active_radius_chunks;
+    let keep_radius = cache.keep_radius_chunks.max(radius);
+    let mut active_set = HashSet::new();
+    let mut keep_set = HashSet::new();
 
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             let coord = ChunkCoord::new(center_coord.cx + dx, center_coord.cy + dy);
             let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+            active_set.insert(key.clone());
             if runtime.ensure_loaded(&key) {
                 runtime.touch(&key);
             } else if runtime.requested.insert(key.clone()) {
@@ -383,6 +449,15 @@ fn active_area_chunk_request_system(
             }
         }
     }
+    for dy in -keep_radius..=keep_radius {
+        for dx in -keep_radius..=keep_radius {
+            let coord = ChunkCoord::new(center_coord.cx + dx, center_coord.cy + dy);
+            let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+            keep_set.insert(key);
+        }
+    }
+    runtime.active_set = active_set;
+    runtime.keep_set = keep_set;
 }
 
 fn init_storage(world: &mut World) {
@@ -465,6 +540,7 @@ fn autosave_flush_system(
     mut queue: ResMut<SaveQueue>,
     services: NonSend<StorageServices>,
     session: Res<WorldSession>,
+    mut runtime: ResMut<WorldRuntime>,
     mut status: ResMut<StorageStatus>,
 ) {
     state.timer.tick(time.delta());
@@ -475,6 +551,10 @@ fn autosave_flush_system(
                 Ok(()) => {
                     for _ in 0..save_task.pending_count {
                         queue.pending.pop_front();
+                    }
+                    for key in save_task.keys {
+                        runtime.queued_for_save.remove(&key);
+                        runtime.dirty.remove(&key);
                     }
                     status.mark_ok();
                 }
@@ -510,8 +590,9 @@ fn autosave_flush_system(
     let storage = services.storage.clone();
     let world_id = session.world_id.clone();
     let tick = session.tick;
+    let chunk_keys: Vec<ChunkKey> = batch.iter().map(|record| record.key.clone()).collect();
+    let save_keys = chunk_keys.clone();
     let task = AsyncComputeTaskPool::get().spawn_local(async move {
-        let chunk_keys = batch.iter().map(|record| record.key.clone()).collect();
         let savepoint_id = storage
             .begin_savepoint(&world_id, tick, chunk_keys)
             .await?;
@@ -522,6 +603,7 @@ fn autosave_flush_system(
     state.in_flight = Some(SaveTask {
         task,
         pending_count,
+        keys: save_keys,
     });
 }
 
@@ -615,20 +697,27 @@ fn chunk_loaded_system(
             None => {
                 let generated =
                     generate_chunk_data(event.key.coord, event.key.layer, session.tick);
-                let view = SimChunkView::from_data(&generated);
-                match services.codec.encode(&view, session.tick) {
-                    Ok(blob) => {
-                        let updated_at_ms = time.elapsed().as_millis() as u64;
-                        queue.pending.push_back(ChunkRecordWrite {
-                            key: event.key.clone(),
-                            blob,
-                            tick_saved: session.tick,
-                            checksum: 0,
-                            updated_at_ms,
-                        });
-                        runtime.mark_dirty(event.key.clone());
+                let mut queued = false;
+                if !runtime.queued_for_save.contains(&event.key) {
+                    let view = SimChunkView::from_data(&generated);
+                    match services.codec.encode(&view, session.tick) {
+                        Ok(blob) => {
+                            let updated_at_ms = time.elapsed().as_millis() as u64;
+                            runtime.queued_for_save.insert(event.key.clone());
+                            queue.pending.push_back(ChunkRecordWrite {
+                                key: event.key.clone(),
+                                blob,
+                                tick_saved: session.tick,
+                                checksum: 0,
+                                updated_at_ms,
+                            });
+                            queued = true;
+                        }
+                        Err(error) => status.record_error(&error),
                     }
-                    Err(error) => status.record_error(&error),
+                }
+                if queued {
+                    runtime.mark_dirty(event.key.clone());
                 }
                 generated
             }
@@ -668,6 +757,86 @@ fn chunk_loaded_system(
     }
 }
 
+fn chunk_eviction_system(
+    mut commands: Commands,
+    mut runtime: ResMut<WorldRuntime>,
+    cache: Res<ChunkCacheConfig>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut stats: ResMut<EvictionStats>,
+) {
+    stats.timer.tick(time.delta());
+
+    let allow_eviction = queue.pending.len() <= 512;
+    let allow_dirty_eviction = queue.pending.is_empty();
+    let mut evicted = 0usize;
+
+    if allow_eviction
+        && runtime.loaded.len() > cache.max_loaded_chunks
+        && !runtime.keep_set.is_empty()
+    {
+        let mut candidates: Vec<(u64, ChunkKey)> = Vec::new();
+        for key in runtime.loaded.keys() {
+            if runtime.keep_set.contains(key) {
+                continue;
+            }
+            let last_access = runtime.last_access_frame.get(key).copied().unwrap_or(0);
+            candidates.push((last_access, key.clone()));
+        }
+        candidates.sort_by_key(|(frame, _)| *frame);
+
+        for (_, key) in candidates {
+            if runtime.loaded.len() <= cache.max_loaded_chunks || evicted >= cache.evict_per_frame {
+                break;
+            }
+
+            if runtime.dirty.contains(&key) {
+                if !allow_dirty_eviction {
+                    continue;
+                }
+                if !runtime.queued_for_save.contains(&key) {
+                    let Some(loaded) = runtime.loaded.get(&key) else {
+                        continue;
+                    };
+                    let view = SimChunkView::from_data(&loaded.data);
+                    match services.codec.encode(&view, session.tick) {
+                        Ok(blob) => {
+                            let updated_at_ms = time.elapsed().as_millis() as u64;
+                            runtime.queued_for_save.insert(key.clone());
+                            queue.pending.push_back(ChunkRecordWrite {
+                                key: key.clone(),
+                                blob,
+                                tick_saved: session.tick,
+                                checksum: 0,
+                                updated_at_ms,
+                            });
+                        }
+                        Err(error) => {
+                            status.record_error(&error);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if let Some(loaded) = runtime.loaded.remove(&key) {
+                commands.entity(loaded.sprite_entity).despawn_recursive();
+            }
+            runtime.last_access_frame.remove(&key);
+            evicted += 1;
+        }
+    }
+
+    stats.evicted_this_window += evicted;
+    if stats.timer.just_finished() {
+        stats.evicted_per_second = stats.evicted_this_window;
+        stats.evicted_this_window = 0;
+    }
+}
+
 fn storage_status_text_system(
     status: Res<StorageStatus>,
     mut query: Query<&mut Text, With<StorageStatusText>>,
@@ -676,6 +845,25 @@ fn storage_status_text_system(
         return;
     }
     let label = status.label();
+    for mut text in &mut query {
+        *text = Text::new(label.clone());
+    }
+}
+
+fn world_stats_text_system(
+    runtime: Res<WorldRuntime>,
+    stats: Res<EvictionStats>,
+    mut query: Query<&mut Text, With<WorldStatsText>>,
+) {
+    if !runtime.is_changed() && !stats.is_changed() {
+        return;
+    }
+    let label = format!(
+        "Chunks: {} | Dirty: {} | Evict/s: {}",
+        runtime.loaded.len(),
+        runtime.dirty.len(),
+        stats.evicted_per_second
+    );
     for mut text in &mut query {
         *text = Text::new(label.clone());
     }
@@ -723,7 +911,7 @@ fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
 
 fn build_chunk_image(data: &SimChunkData) -> Image {
     let pixels = chunk_pixels(data);
-    Image::new_fill(
+    let mut image = Image::new_fill(
         Extent3d {
             width: CHUNK_EDGE as u32,
             height: CHUNK_EDGE as u32,
@@ -733,7 +921,9 @@ fn build_chunk_image(data: &SimChunkData) -> Image {
         &pixels,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::all(),
-    )
+    );
+    image.sampler = ImageSampler::nearest();
+    image
 }
 
 fn chunk_pixels(data: &SimChunkData) -> Vec<u8> {

@@ -8,7 +8,7 @@ mod wasm {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
 
     use idb::{
         Database, DatabaseEvent, Event, Factory, KeyPath, ObjectStore, ObjectStoreParams, Query,

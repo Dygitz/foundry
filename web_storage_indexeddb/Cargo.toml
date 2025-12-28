@@ -11,3 +11,4 @@ idb = "0.6.4"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
+web-time = "1"
