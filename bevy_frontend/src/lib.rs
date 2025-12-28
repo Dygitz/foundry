@@ -378,7 +378,7 @@ fn setup(mut commands: Commands, config: Res<WorldRenderConfig>) {
             custom_size: Some(Vec2::splat(config.tile_size * 0.8)),
             ..default()
         },
-        Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
         Velocity(Vec2::ZERO),
         Player,
     ));
