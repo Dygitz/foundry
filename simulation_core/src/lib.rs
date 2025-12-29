@@ -19,6 +19,7 @@ pub type TileId = u16;
 pub type EntityKind = u16;
 pub type ResourceId = u8;
 pub type PlacedId = u8;
+pub type ObjectId = u64;
 
 pub const RES_NONE: ResourceId = 0;
 pub const RES_IRON: ResourceId = 1;
@@ -39,6 +40,7 @@ pub struct ResourceCell {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PlacedCell {
     pub kind: PlacedId,
+    pub object_id: ObjectId,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -56,6 +58,8 @@ pub struct SimChunkData {
     pub tiles: Vec<TileId>,
     pub resources: Vec<ResourceCell>,
     pub placed: Vec<PlacedCell>,
+    pub chests: Vec<ChestRecord>,
+    pub furnaces: Vec<FurnaceRecord>,
     pub entities: Vec<Entity>,
     pub saved_tick: u64,
 }
@@ -67,6 +71,8 @@ pub struct SimChunkView<'a> {
     pub tiles: &'a [TileId],
     pub resources: &'a [ResourceCell],
     pub placed: &'a [PlacedCell],
+    pub chests: &'a [ChestRecord],
+    pub furnaces: &'a [FurnaceRecord],
     pub entities: &'a [Entity],
 }
 
@@ -78,11 +84,19 @@ impl<'a> SimChunkView<'a> {
             tiles: &data.tiles,
             resources: &data.resources,
             placed: &data.placed,
+            chests: &data.chests,
+            furnaces: &data.furnaces,
             entities: &data.entities,
         }
     }
 }
+pub mod containers;
 pub mod inventory;
+pub use containers::{
+    deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input, take_from_chest,
+    take_from_furnace, ChestRecord, ContainerInv, FurnaceRecord, FurnaceSlot, FurnaceState, Slot,
+    CHEST_SLOT_COUNT,
+};
 pub use inventory::{
     Inventory, ItemId, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE,
     ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE,

@@ -5,6 +5,9 @@ use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::MouseWheel;
 use bevy::input::ButtonInput;
 use bevy::log::{info, warn};
+use bevy::ecs::prelude::ChildSpawnerCommands;
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::camera::{OrthographicProjection, Projection};
 use bevy::window::{Window, WindowPlugin};
@@ -17,11 +20,13 @@ use persistence::{
     PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId, WorldStorage,
 };
 use simulation_core::{
-    Inventory, ItemId, PlacedCell, PlacedId, ResourceCell, ResourceId, SimChunkData, SimChunkView,
-    TileId, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE,
-    ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE, PLACED_CHEST, PLACED_FURNACE,
-    PLACED_NONE, RES_COAL, RES_COPPER, RES_IRON, RES_NONE, RES_STONE, CHUNK_EDGE,
-    CHUNK_TILE_COUNT,
+    deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input, take_from_chest,
+    take_from_furnace, ChestRecord, ContainerInv, FurnaceRecord, FurnaceSlot, FurnaceState,
+    Inventory, ItemId, ObjectId, PlacedCell, PlacedId, ResourceCell, ResourceId, SimChunkData,
+    SimChunkView, TileId, CHEST_SLOT_COUNT, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE,
+    ITEM_COPPER_PLATE, ITEM_FURNACE, ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE,
+    PLACED_CHEST, PLACED_FURNACE, PLACED_NONE, RES_COAL, RES_COPPER, RES_IRON, RES_NONE,
+    RES_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
 };
 use web_storage_indexeddb::IndexedDbStorage;
 
@@ -38,8 +43,8 @@ pub fn run() {
         .insert_resource(PlayerState::default())
         .insert_resource(PlayerStateSaveState::default())
         .insert_resource(PlayerStateLoadState::default())
-        .insert_resource(CraftMenuState::default())
         .insert_resource(PlacementState::default())
+        .insert_resource(UiState::default())
         .insert_resource(ClickHighlight::default())
         .insert_resource(DebugConfig::default())
         .insert_resource(EvictionStats::default())
@@ -58,6 +63,7 @@ pub fn run() {
                 ..default()
             }),
         )
+        .configure_sets(Update, (UpdateSet::Input, UpdateSet::Ui, UpdateSet::World).chain())
         .add_systems(Startup, (setup, init_storage))
         .add_systems(
             Update,
@@ -77,22 +83,47 @@ pub fn run() {
                 player_visual_system,
                 craft_menu_toggle_system,
                 placement_select_system,
+                ui_close_system,
                 inventory_debug_input_system,
                 crafting_input_system,
-                mining_input_system,
+            )
+                .in_set(UpdateSet::Input),
+        )
+        .add_systems(
+            Update,
+            (mining_input_system,).in_set(UpdateSet::Input),
+        )
+        .add_systems(
+            Update,
+            (
+                ui_visibility_system,
                 inventory_text_system,
                 placement_text_system,
                 craft_menu_text_system,
-                player_state_save_system,
+                chest_ui_system,
+                furnace_ui_system,
+                chest_button_system,
+                furnace_button_system,
+            )
+                .in_set(UpdateSet::Ui),
+        )
+        .add_systems(
+            Update,
+            (player_state_save_system,).in_set(UpdateSet::Ui),
+        )
+        .add_systems(
+            Update,
+            (
                 camera_follow_system,
                 camera_zoom_system,
                 active_area_chunk_request_system,
                 chunk_load_pump_system,
                 chunk_loaded_system,
+                furnace_smelting_system,
                 chunk_eviction_system,
                 world_stats_text_system,
             )
-                .chain(),
+                .in_set(UpdateSet::World),
         )
         .run();
 }
@@ -381,6 +412,55 @@ struct CraftMenuText;
 struct PlacementText;
 
 #[derive(Component)]
+struct UiOverlay;
+
+#[derive(Component)]
+struct UiPanelRoot;
+
+#[derive(Component)]
+struct CraftPanelText;
+
+#[derive(Component)]
+struct ChestPanel;
+
+#[derive(Component)]
+struct FurnacePanel;
+
+#[derive(Component)]
+struct ChestSlotButton {
+    index: usize,
+}
+
+#[derive(Component)]
+struct ChestSlotText {
+    index: usize,
+}
+
+#[derive(Component)]
+struct ChestDepositButton {
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct FurnaceSlotButton {
+    slot: FurnaceSlot,
+}
+
+#[derive(Component)]
+struct FurnaceSlotText {
+    slot: FurnaceSlot,
+}
+
+#[derive(Component)]
+struct FurnaceDepositButton {
+    slot: FurnaceSlot,
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct FurnaceProgressBar;
+
+#[derive(Component)]
 struct Player;
 
 #[derive(Component, Copy, Clone)]
@@ -400,13 +480,34 @@ struct PlayerState {
 }
 
 #[derive(Resource, Default)]
-struct CraftMenuState {
-    open: bool,
+struct PlacementState {
+    selected: Option<ItemId>,
 }
 
 #[derive(Resource, Default)]
-struct PlacementState {
-    selected: Option<ItemId>,
+struct UiState {
+    mode: UiMode,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum UiMode {
+    None,
+    Crafting,
+    Chest { object_id: ObjectId },
+    Furnace { object_id: ObjectId },
+}
+
+impl Default for UiMode {
+    fn default() -> Self {
+        UiMode::None
+    }
+}
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+enum UpdateSet {
+    Input,
+    Ui,
+    World,
 }
 
 #[derive(Resource)]
@@ -571,6 +672,308 @@ Plates: Iron 0 | Copper 0 | Furnace 0 | Chest 0",
         },
         PlacementText,
     ));
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            Visibility::Hidden,
+            UiOverlay,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                UiPanelRoot,
+            ));
+        });
+}
+
+fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(500.0),
+                height: Val::Px(320.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::FlexStart,
+                align_items: AlignItems::FlexStart,
+                padding: UiRect::all(Val::Px(12.0)),
+                row_gap: Val::Px(8.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.15, 0.15, 0.18)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Crafting"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.95)),
+            ));
+            panel.spawn((
+                Text::new(
+                    "1) Iron Plate: 1 Iron Ore + 1 Coal\n\
+2) Copper Plate: 1 Copper Ore + 1 Coal\n\
+3) Furnace: 10 Stone\n\
+4) Chest: 10 Stone",
+                ),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                CraftPanelText,
+            ));
+            panel.spawn((
+                Text::new("Press 1-4 to craft. Esc to close."),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.8, 0.8)),
+            ));
+        });
+}
+
+fn spawn_chest_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(520.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                row_gap: Val::Px(8.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+            ChestPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Chest"),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.95)),
+            ));
+            panel
+                .spawn(Node {
+                    display: Display::Flex,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(6.0),
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for index in 0..CHEST_SLOT_COUNT {
+                        grid.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(60.0),
+                                height: Val::Px(24.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.18, 0.18, 0.2)),
+                            ChestSlotButton { index },
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new("Empty"),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                                ChestSlotText { index },
+                            ));
+                        });
+                    }
+                });
+            panel
+                .spawn(Node {
+                    display: Display::Flex,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(6.0),
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    let items = [
+                        (ITEM_IRON_ORE, "Deposit Iron"),
+                        (ITEM_COPPER_ORE, "Deposit Copper"),
+                        (ITEM_COAL, "Deposit Coal"),
+                        (ITEM_STONE, "Deposit Stone"),
+                        (ITEM_IRON_PLATE, "Deposit Iron Plate"),
+                        (ITEM_COPPER_PLATE, "Deposit Copper Plate"),
+                    ];
+                    for (item, label) in items {
+                        row.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(120.0),
+                                height: Val::Px(24.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.2, 0.2, 0.22)),
+                            ChestDepositButton { item },
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new(label),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                            ));
+                        });
+                    }
+                });
+        });
+}
+
+fn spawn_furnace_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(360.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                row_gap: Val::Px(8.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+            FurnacePanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Furnace"),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.95)),
+            ));
+            let slots = [
+                (FurnaceSlot::Input, "Input"),
+                (FurnaceSlot::Fuel, "Fuel"),
+                (FurnaceSlot::Output, "Output"),
+            ];
+            for (slot, label) in slots {
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(200.0),
+                            height: Val::Px(24.0),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::new(
+                                Val::Px(6.0),
+                                Val::Px(6.0),
+                                Val::Px(0.0),
+                                Val::Px(0.0),
+                            ),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.18, 0.18, 0.2)),
+                        FurnaceSlotButton { slot },
+                    ))
+                    .with_children(|button| {
+                        button.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: 11.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                        ));
+                        button.spawn((
+                            Text::new("Empty"),
+                            TextFont {
+                                font_size: 11.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                            FurnaceSlotText { slot },
+                        ));
+                    });
+            }
+            panel
+                .spawn(Node {
+                    width: Val::Px(200.0),
+                    height: Val::Px(10.0),
+                    ..default()
+                })
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Px(0.0),
+                            height: Val::Px(10.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.3, 0.8, 0.3)),
+                        FurnaceProgressBar,
+                    ));
+                });
+            panel
+                .spawn(Node {
+                    display: Display::Flex,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(6.0),
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    let inputs = [
+                        (FurnaceSlot::Input, ITEM_IRON_ORE, "Input Iron"),
+                        (FurnaceSlot::Input, ITEM_COPPER_ORE, "Input Copper"),
+                        (FurnaceSlot::Fuel, ITEM_COAL, "Fuel Coal"),
+                    ];
+                    for (slot, item, label) in inputs {
+                        row.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(120.0),
+                                height: Val::Px(24.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.2, 0.2, 0.22)),
+                            FurnaceDepositButton { slot, item },
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new(label),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                            ));
+                        });
+                    }
+                });
+        });
 }
 
 fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
@@ -583,8 +986,12 @@ fn player_movement_system(
     config: Res<PlayerConfig>,
     render_config: Res<WorldRenderConfig>,
     session: Res<WorldSession>,
+    ui_state: Res<UiState>,
     mut player_query: Query<(&mut Transform, &mut Velocity, &mut Facing), With<Player>>,
 ) {
+    if ui_state.mode != UiMode::None {
+        return;
+    }
     let mut direction = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         direction.y += 1.0;
@@ -653,18 +1060,84 @@ fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Pla
 
 fn craft_menu_toggle_system(
     keys: Res<ButtonInput<KeyCode>>,
-    mut menu: ResMut<CraftMenuState>,
+    mut ui_state: ResMut<UiState>,
 ) {
     if !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
-    menu.open = !menu.open;
+    match ui_state.mode {
+        UiMode::None => ui_state.mode = UiMode::Crafting,
+        UiMode::Crafting => ui_state.mode = UiMode::None,
+        _ => {}
+    }
+}
+
+fn ui_close_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut ui_state: ResMut<UiState>,
+) {
+    if keys.just_pressed(KeyCode::Escape) || buttons.just_pressed(MouseButton::Right) {
+        ui_state.mode = UiMode::None;
+    }
+}
+
+fn ui_visibility_system(
+    mut commands: Commands,
+    ui_state: Res<UiState>,
+    mut overlay_query: Query<&mut Visibility, With<UiOverlay>>,
+    panel_query: Query<Entity, With<UiPanelRoot>>,
+    children_query: Query<&Children, With<UiPanelRoot>>,
+) {
+    if !ui_state.is_changed() {
+        return;
+    }
+    let Ok(mut overlay_visibility) = overlay_query.single_mut() else {
+        return;
+    };
+    let Ok(panel_entity) = panel_query.single() else {
+        return;
+    };
+
+    if let Ok(children) = children_query.get(panel_entity) {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+
+    match ui_state.mode {
+        UiMode::None => {
+            *overlay_visibility = Visibility::Hidden;
+        }
+        UiMode::Crafting => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_crafting_panel(parent));
+        }
+        UiMode::Chest { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_chest_panel(parent));
+        }
+        UiMode::Furnace { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_furnace_panel(parent));
+        }
+    }
 }
 
 fn placement_select_system(
     keys: Res<ButtonInput<KeyCode>>,
+    ui_state: Res<UiState>,
     mut placement: ResMut<PlacementState>,
 ) {
+    if ui_state.mode != UiMode::None {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyF) {
         placement.selected = Some(ITEM_FURNACE);
     }
@@ -678,10 +1151,10 @@ fn placement_select_system(
 
 fn crafting_input_system(
     keys: Res<ButtonInput<KeyCode>>,
-    menu: Res<CraftMenuState>,
+    ui_state: Res<UiState>,
     mut player: ResMut<PlayerState>,
 ) {
-    if !menu.open {
+    if ui_state.mode != UiMode::Crafting {
         return;
     }
 
@@ -701,10 +1174,10 @@ fn crafting_input_system(
 
 fn inventory_debug_input_system(
     keys: Res<ButtonInput<KeyCode>>,
-    menu: Res<CraftMenuState>,
+    ui_state: Res<UiState>,
     mut player: ResMut<PlayerState>,
 ) {
-    if menu.open {
+    if ui_state.mode != UiMode::None {
         return;
     }
     if keys.just_pressed(KeyCode::Digit1) {
@@ -724,143 +1197,161 @@ fn inventory_debug_input_system(
     }
 }
 
+#[derive(SystemParam)]
+struct MiningParams<'w, 's> {
+    config: Res<'w, WorldRenderConfig>,
+    session: Res<'w, WorldSession>,
+    runtime: ResMut<'w, WorldRuntime>,
+    player: ResMut<'w, PlayerState>,
+    player_query: Query<'w, 's, &'static Transform, With<Player>>,
+    placement: ResMut<'w, PlacementState>,
+    ui_state: ResMut<'w, UiState>,
+    images: ResMut<'w, Assets<Image>>,
+    services: NonSend<'w, StorageServices>,
+    time: Res<'w, Time>,
+    queue: ResMut<'w, SaveQueue>,
+    status: ResMut<'w, StorageStatus>,
+    debug: Res<'w, DebugConfig>,
+    highlight: ResMut<'w, ClickHighlight>,
+}
+
 fn mining_input_system(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    config: Res<WorldRenderConfig>,
-    session: Res<WorldSession>,
-    mut runtime: ResMut<WorldRuntime>,
-    mut player: ResMut<PlayerState>,
-    player_query: Query<&Transform, With<Player>>,
-    mut placement: ResMut<PlacementState>,
-    mut images: ResMut<Assets<Image>>,
-    services: NonSend<StorageServices>,
-    time: Res<Time>,
-    mut queue: ResMut<SaveQueue>,
-    mut status: ResMut<StorageStatus>,
-    debug: Res<DebugConfig>,
-    mut highlight: ResMut<ClickHighlight>,
+    mut params: MiningParams,
 ) {
+    let log_mining = params.debug.log_mining;
     if !buttons.just_pressed(MouseButton::Left) {
         return;
     }
-    if debug.log_mining {
+    if params.ui_state.mode != UiMode::None {
+        return;
+    }
+    if log_mining {
         info!("mine click");
     }
 
     let Ok(window) = windows.single() else {
-        if debug.log_mining {
+        if log_mining {
             warn!("mine click: missing window");
         }
         return;
     };
     let Some(cursor_pos) = window.cursor_position() else {
-        if debug.log_mining {
+        if log_mining {
             warn!("mine click: no cursor position");
         }
         return;
     };
     let Ok((camera, camera_transform)) = camera_query.single() else {
-        if debug.log_mining {
+        if log_mining {
             warn!("mine click: missing camera");
         }
         return;
     };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
-        if debug.log_mining {
+        if log_mining {
             warn!("mine click: viewport_to_world_2d failed");
         }
         return;
     };
 
-    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
-    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
-    let previous_highlight = highlight.tile;
-    highlight.tile = Some((tile_x, tile_y));
+    let tile_x = (world_pos.x / params.config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / params.config.tile_size).floor() as i32;
+    if params.placement.selected.is_none() {
+        if let Some(open_panel) =
+            open_panel_for_tile(tile_x, tile_y, &params.config, &params.session, &params.runtime)
+        {
+            params.ui_state.mode = open_panel;
+            return;
+        }
+    }
+    let previous_highlight = params.highlight.tile;
+    params.highlight.tile = Some((tile_x, tile_y));
     if let Some((prev_x, prev_y)) = previous_highlight {
         refresh_highlight_chunk(
             prev_x,
             prev_y,
-            &config,
-            &session,
-            &runtime,
-            &mut images,
-            highlight.tile,
+            &params.config,
+            &params.session,
+            &params.runtime,
+            &mut params.images,
+            params.highlight.tile,
         );
     }
     refresh_highlight_chunk(
         tile_x,
         tile_y,
-        &config,
-        &session,
-        &runtime,
-        &mut images,
-        highlight.tile,
+        &params.config,
+        &params.session,
+        &params.runtime,
+        &mut params.images,
+        params.highlight.tile,
     );
 
-    if let Some(item) = placement.selected {
+    if let Some(item) = params.placement.selected {
         let placed = try_place_at_world_pos(
             world_pos,
             item,
-            &config,
-            &session,
-            &mut runtime,
-            &mut player,
-            &mut images,
-            &services,
-            &time,
-            &mut queue,
-            &mut status,
-            highlight.tile,
+            &params.config,
+            &params.session,
+            &mut params.runtime,
+            &mut params.player,
+            &mut params.images,
+            &params.services,
+            &params.time,
+            &mut params.queue,
+            &mut params.status,
+            params.highlight.tile,
         );
-        if placed && player.inventory.count(item) == 0 {
-            placement.selected = None;
+        if placed && params.player.inventory.count(item) == 0 {
+            params.placement.selected = None;
         }
-        if !placed && player.inventory.count(item) == 0 {
-            placement.selected = None;
+        if !placed && params.player.inventory.count(item) == 0 {
+            params.placement.selected = None;
         }
         return;
     }
 
     let mut mined = try_mine_at_world_pos(
         world_pos,
-        &config,
-        &session,
-        &mut runtime,
-        &mut player,
-        &mut images,
-        &services,
-        &time,
-        &mut queue,
-        &mut status,
-        debug.log_mining,
-        highlight.tile,
+        &params.config,
+        &params.session,
+        &mut params.runtime,
+        &mut params.player,
+        &mut params.images,
+        &params.services,
+        &params.time,
+        &mut params.queue,
+        &mut params.status,
+        log_mining,
+        params.highlight.tile,
     );
 
     if !mined {
-        if let Ok(player_transform) = player_query.single() {
+        if let Ok(player_transform) = params.player_query.single() {
             let player_pos = player_transform.translation.truncate();
-            if player_pos.distance(world_pos) <= config.tile_size * 0.75 {
+            if player_pos.distance(world_pos) <= params.config.tile_size * 0.75 {
                 mined = try_mine_at_world_pos(
                     player_pos,
-                    &config,
-                    &session,
-                    &mut runtime,
-                    &mut player,
-                    &mut images,
-                    &services,
-                    &time,
-                    &mut queue,
-                    &mut status,
-                    debug.log_mining,
-                    highlight.tile,
+                    &params.config,
+                    &params.session,
+                    &mut params.runtime,
+                    &mut params.player,
+                    &mut params.images,
+                    &params.services,
+                    &params.time,
+                    &mut params.queue,
+                    &mut params.status,
+                    log_mining,
+                    params.highlight.tile,
                 );
             }
         }
     }
 
-    if debug.log_mining && !mined {
+    if log_mining && !mined {
         info!("mine result: no ore mined");
     }
 }
@@ -904,6 +1395,19 @@ const RECIPE_CHEST: Recipe = Recipe {
     output_amount: 1,
     inputs: &[(ITEM_STONE, 10)],
 };
+
+const FURNACE_PROGRESS_PER_ITEM: u16 = 1000;
+const FURNACE_SECONDS_PER_ITEM: f32 = 2.0;
+const FURNACE_PROGRESS_PER_SEC: f32 =
+    FURNACE_PROGRESS_PER_ITEM as f32 / FURNACE_SECONDS_PER_ITEM;
+
+fn smelt_output_for_input(item: ItemId) -> Option<ItemId> {
+    match item {
+        ITEM_IRON_ORE => Some(ITEM_IRON_PLATE),
+        ITEM_COPPER_ORE => Some(ITEM_COPPER_PLATE),
+        _ => None,
+    }
+}
 
 fn try_craft(inv: &mut Inventory, recipe: &Recipe) -> bool {
     for (item, amount) in recipe.inputs {
@@ -1176,10 +1680,37 @@ fn try_place_tile(
         if cell.kind != PLACED_NONE {
             return false;
         }
+        let object_id = object_id_for_tile(session.world_seed, tile_x, tile_y, placed_kind);
         if !player.inventory.try_remove(item, 1) {
             return false;
         }
         cell.kind = placed_kind;
+        cell.object_id = object_id;
+        if placed_kind == PLACED_CHEST {
+            if !loaded
+                .data
+                .chests
+                .iter()
+                .any(|chest| chest.object_id == object_id)
+            {
+                loaded.data.chests.push(ChestRecord {
+                    object_id,
+                    inv: ContainerInv::default(),
+                });
+            }
+        } else if placed_kind == PLACED_FURNACE {
+            if !loaded
+                .data
+                .furnaces
+                .iter()
+                .any(|furnace| furnace.object_id == object_id)
+            {
+                loaded.data.furnaces.push(FurnaceRecord {
+                    object_id,
+                    state: FurnaceState::default(),
+                });
+            }
+        }
         (
             loaded.texture_handle.clone(),
             loaded.data.clone(),
@@ -1233,18 +1764,14 @@ fn inventory_text_system(
 }
 
 fn craft_menu_text_system(
-    menu: Res<CraftMenuState>,
+    ui_state: Res<UiState>,
     mut query: Query<&mut Text, With<CraftMenuText>>,
 ) {
-    if !menu.is_changed() {
+    if !ui_state.is_changed() {
         return;
     }
-    let label = if menu.open {
-        "Crafting (E to close)\n\
-1) Iron Plate: 1 Iron Ore + 1 Coal\n\
-2) Copper Plate: 1 Copper Ore + 1 Coal\n\
-3) Furnace: 10 Stone\n\
-4) Chest: 10 Stone"
+    let label = if matches!(ui_state.mode, UiMode::Crafting) {
+        "Crafting (E to close)"
     } else {
         "Crafting (E to open)"
     };
@@ -1280,6 +1807,321 @@ fn placement_text_system(
     }
 }
 
+fn chest_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    mut slot_texts: Query<(&ChestSlotText, &mut Text)>,
+) {
+    let UiMode::Chest { object_id } = ui_state.mode else {
+        return;
+    };
+    let chest = find_chest(&runtime, object_id);
+    for (slot, mut text) in &mut slot_texts {
+        let label = match chest.and_then(|chest| chest.inv.slots.get(slot.index)) {
+            Some(slot) if !slot.is_empty() => {
+                format!("{} x{}", item_name(slot.item), slot.count)
+            }
+            _ => "Empty".to_string(),
+        };
+        *text = Text::new(label);
+    }
+}
+
+fn furnace_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    mut slot_texts: Query<(&FurnaceSlotText, &mut Text)>,
+    mut bar_query: Query<&mut Node, With<FurnaceProgressBar>>,
+) {
+    let UiMode::Furnace { object_id } = ui_state.mode else {
+        return;
+    };
+    let furnace = find_furnace(&runtime, object_id);
+    for (slot, mut text) in &mut slot_texts {
+        let slot_ref = furnace.map(|furnace| match slot.slot {
+            FurnaceSlot::Input => furnace.state.input,
+            FurnaceSlot::Fuel => furnace.state.fuel,
+            FurnaceSlot::Output => furnace.state.output,
+        });
+        let label = match slot_ref {
+            Some(slot) if !slot.is_empty() => {
+                format!("{} x{}", item_name(slot.item), slot.count)
+            }
+            _ => "Empty".to_string(),
+        };
+        *text = Text::new(label);
+    }
+    let width = furnace
+        .map(|furnace| {
+            200.0
+                * (furnace.state.progress as f32
+                    / FURNACE_PROGRESS_PER_ITEM as f32)
+                    .clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.0);
+    for mut node in &mut bar_query {
+        node.width = Val::Px(width);
+    }
+}
+
+fn chest_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &ChestSlotButton), Changed<Interaction>>,
+    mut deposit_buttons: Query<(&Interaction, &ChestDepositButton), Changed<Interaction>>,
+) {
+    let UiMode::Chest { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let result = with_chest_mut(&mut runtime, object_id, |data| {
+            take_from_chest(&mut data.chests, object_id, button.index, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+
+    for (interaction, button) in &mut deposit_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let amount = player.inventory.count(button.item);
+        if amount == 0 {
+            continue;
+        }
+        let result = with_chest_mut(&mut runtime, object_id, |data| {
+            deposit_to_chest(&mut data.chests, object_id, button.item, amount)
+        });
+        if let Some((key, snapshot, moved)) = result {
+            if moved > 0 {
+                let _ = player.inventory.try_remove(button.item, moved);
+                runtime.touch(&key);
+                queue_chunk_save(
+                    &key,
+                    &snapshot,
+                    &services,
+                    &session,
+                    &time,
+                    &mut runtime,
+                    &mut queue,
+                    &mut status,
+                );
+            }
+        }
+    }
+}
+
+fn furnace_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &FurnaceSlotButton), Changed<Interaction>>,
+    mut deposit_buttons: Query<(&Interaction, &FurnaceDepositButton), Changed<Interaction>>,
+) {
+    let UiMode::Furnace { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let result = with_furnace_mut(&mut runtime, object_id, |data| {
+            take_from_furnace(&mut data.furnaces, object_id, button.slot, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+
+    for (interaction, button) in &mut deposit_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let amount = player.inventory.count(button.item);
+        if amount == 0 {
+            continue;
+        }
+        let result = with_furnace_mut(&mut runtime, object_id, |data| match button.slot {
+            FurnaceSlot::Input => deposit_to_furnace_input(
+                &mut data.furnaces,
+                object_id,
+                button.item,
+                amount,
+            ),
+            FurnaceSlot::Fuel => deposit_to_furnace_fuel(
+                &mut data.furnaces,
+                object_id,
+                button.item,
+                amount,
+            ),
+            FurnaceSlot::Output => 0,
+        });
+        if let Some((key, snapshot, moved)) = result {
+            if moved > 0 {
+                let _ = player.inventory.try_remove(button.item, moved);
+                runtime.touch(&key);
+                queue_chunk_save(
+                    &key,
+                    &snapshot,
+                    &services,
+                    &session,
+                    &time,
+                    &mut runtime,
+                    &mut queue,
+                    &mut status,
+                );
+            }
+        }
+    }
+}
+
+fn furnace_smelting_system(
+    time: Res<Time>,
+    mut runtime: ResMut<WorldRuntime>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+) {
+    let delta = time.delta_secs();
+    if delta <= 0.0 {
+        return;
+    }
+
+    let mut save_keys = Vec::new();
+
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        let mut smelted_in_chunk = false;
+
+        for furnace in &mut loaded.data.furnaces {
+            let output_item = smelt_output_for_input(furnace.state.input.item);
+            let can_smelt = output_item.is_some()
+                && !furnace.state.input.is_empty()
+                && furnace.state.fuel.item == ITEM_COAL
+                && furnace.state.fuel.count > 0
+                && (furnace.state.output.is_empty()
+                    || furnace.state.output.item == output_item.unwrap());
+
+            if !can_smelt {
+                if furnace.state.progress != 0 {
+                    furnace.state.progress = 0;
+                }
+                continue;
+            }
+
+            let output_item = output_item.unwrap();
+            let mut progress =
+                furnace.state.progress as f32 + delta * FURNACE_PROGRESS_PER_SEC;
+
+            while progress >= FURNACE_PROGRESS_PER_ITEM as f32 {
+                if furnace.state.input.is_empty()
+                    || furnace.state.fuel.is_empty()
+                    || (!furnace.state.output.is_empty()
+                        && furnace.state.output.item != output_item)
+                {
+                    break;
+                }
+
+                furnace.state.input.count =
+                    furnace.state.input.count.saturating_sub(1);
+                if furnace.state.input.count == 0 {
+                    furnace.state.input.clear();
+                }
+                furnace.state.fuel.count =
+                    furnace.state.fuel.count.saturating_sub(1);
+                if furnace.state.fuel.count == 0 {
+                    furnace.state.fuel.clear();
+                }
+                if furnace.state.output.is_empty() {
+                    furnace.state.output.item = output_item;
+                    furnace.state.output.count = 1;
+                } else {
+                    furnace.state.output.count =
+                        furnace.state.output.count.saturating_add(1);
+                }
+
+                smelted_in_chunk = true;
+                progress -= FURNACE_PROGRESS_PER_ITEM as f32;
+            }
+
+            let still_can_smelt = !furnace.state.input.is_empty()
+                && furnace.state.fuel.item == ITEM_COAL
+                && furnace.state.fuel.count > 0
+                && (furnace.state.output.is_empty()
+                    || furnace.state.output.item == output_item);
+
+            furnace.state.progress = if still_can_smelt {
+                progress.min(FURNACE_PROGRESS_PER_ITEM as f32) as u16
+            } else {
+                0
+            };
+        }
+
+        if smelted_in_chunk {
+            save_keys.push(key.clone());
+        }
+    }
+
+    for key in save_keys {
+        let snapshot = runtime.loaded.get(&key).map(|loaded| loaded.data.clone());
+        if let Some(snapshot) = snapshot {
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+}
+
 fn camera_follow_system(
     time: Res<Time>,
     config: Res<PlayerConfig>,
@@ -1301,8 +2143,12 @@ fn camera_follow_system(
 
 fn camera_zoom_system(
     mut scroll: EventReader<MouseWheel>,
+    ui_state: Res<UiState>,
     mut camera_query: Query<&mut Projection, With<Camera2d>>,
 ) {
+    if ui_state.mode != UiMode::None {
+        return;
+    }
     let Ok(mut projection) = camera_query.single_mut() else {
         return;
     };
@@ -1937,13 +2783,21 @@ fn generate_chunk_data(
         }
     }
     let resources = generate_resources(coord, layer, world_seed, &tiles);
-    let placed = vec![PlacedCell { kind: PLACED_NONE }; CHUNK_TILE_COUNT];
+    let placed = vec![
+        PlacedCell {
+            kind: PLACED_NONE,
+            object_id: 0,
+        };
+        CHUNK_TILE_COUNT
+    ];
     SimChunkData {
         coord,
         layer,
         tiles,
         resources,
         placed,
+        chests: Vec::new(),
+        furnaces: Vec::new(),
         entities: Vec::new(),
         saved_tick,
     }
@@ -2171,6 +3025,99 @@ fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
         (coord.cx as f32 + 0.5) * chunk_size,
         (coord.cy as f32 + 0.5) * chunk_size,
     )
+}
+
+fn open_panel_for_tile(
+    tile_x: i32,
+    tile_y: i32,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &WorldRuntime,
+) -> Option<UiMode> {
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    let Some(loaded) = runtime.loaded.get(&key) else {
+        return None;
+    };
+    let edge = CHUNK_EDGE as i32;
+    let idx = (local_y as usize) * (edge as usize) + (local_x as usize);
+    let cell = loaded.data.placed.get(idx)?;
+    if cell.kind == PLACED_CHEST && cell.object_id != 0 {
+        return Some(UiMode::Chest {
+            object_id: cell.object_id,
+        });
+    }
+    if cell.kind == PLACED_FURNACE && cell.object_id != 0 {
+        return Some(UiMode::Furnace {
+            object_id: cell.object_id,
+        });
+    }
+    None
+}
+
+fn find_chest<'a>(runtime: &'a WorldRuntime, object_id: ObjectId) -> Option<&'a ChestRecord> {
+    runtime
+        .loaded
+        .values()
+        .find_map(|loaded| loaded.data.chests.iter().find(|c| c.object_id == object_id))
+}
+
+fn find_furnace<'a>(
+    runtime: &'a WorldRuntime,
+    object_id: ObjectId,
+) -> Option<&'a FurnaceRecord> {
+    runtime
+        .loaded
+        .values()
+        .find_map(|loaded| loaded.data.furnaces.iter().find(|f| f.object_id == object_id))
+}
+
+fn with_chest_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .chests
+            .iter()
+            .any(|chest| chest.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+fn with_furnace_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .furnaces
+            .iter()
+            .any(|furnace| furnace.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+fn object_id_for_tile(world_seed: u64, gx: i32, gy: i32, kind: PlacedId) -> ObjectId {
+    let mut z = world_seed ^ (kind as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    z ^= (gx as i64 as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    z ^= (gy as i64 as u64).wrapping_mul(0x94d049bb133111eb);
+    let id = mix64(z);
+    if id == 0 { 1 } else { id }
 }
 
 fn build_player_image() -> Image {
@@ -2465,9 +3412,15 @@ fn placed_at(data: &SimChunkData, tx: i32, ty: i32) -> PlacedCell {
             .placed
             .get(idx)
             .copied()
-            .unwrap_or(PlacedCell { kind: PLACED_NONE });
+            .unwrap_or(PlacedCell {
+                kind: PLACED_NONE,
+                object_id: 0,
+            });
     }
-    PlacedCell { kind: PLACED_NONE }
+    PlacedCell {
+        kind: PLACED_NONE,
+        object_id: 0,
+    }
 }
 
 fn is_water(tile: TileId) -> bool {
