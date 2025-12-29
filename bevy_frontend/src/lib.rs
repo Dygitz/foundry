@@ -725,10 +725,8 @@ fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands) {
             ));
             panel.spawn((
                 Text::new(
-                    "1) Iron Plate: 1 Iron Ore + 1 Coal\n\
-2) Copper Plate: 1 Copper Ore + 1 Coal\n\
-3) Furnace: 10 Stone\n\
-4) Chest: 10 Stone",
+                    "1) Furnace: 10 Stone\n\
+2) Chest: 10 Stone",
                 ),
                 TextFont {
                     font_size: 14.0,
@@ -738,7 +736,7 @@ fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands) {
                 CraftPanelText,
             ));
             panel.spawn((
-                Text::new("Press 1-4 to craft. Esc to close."),
+                Text::new("Press 1-2 to craft. Esc to close."),
                 TextFont {
                     font_size: 12.0,
                     ..default()
@@ -1159,42 +1157,22 @@ fn crafting_input_system(
     }
 
     if keys.just_pressed(KeyCode::Digit1) {
-        let _ = try_craft(&mut player.inventory, &RECIPE_IRON_PLATE);
-    }
-    if keys.just_pressed(KeyCode::Digit2) {
-        let _ = try_craft(&mut player.inventory, &RECIPE_COPPER_PLATE);
-    }
-    if keys.just_pressed(KeyCode::Digit3) {
         let _ = try_craft(&mut player.inventory, &RECIPE_FURNACE);
     }
-    if keys.just_pressed(KeyCode::Digit4) {
+    if keys.just_pressed(KeyCode::Digit2) {
         let _ = try_craft(&mut player.inventory, &RECIPE_CHEST);
     }
 }
 
 fn inventory_debug_input_system(
-    keys: Res<ButtonInput<KeyCode>>,
+    _keys: Res<ButtonInput<KeyCode>>,
     ui_state: Res<UiState>,
     mut player: ResMut<PlayerState>,
 ) {
     if ui_state.mode != UiMode::None {
         return;
     }
-    if keys.just_pressed(KeyCode::Digit1) {
-        player.inventory.add(ITEM_IRON_ORE, 10);
-    }
-    if keys.just_pressed(KeyCode::Digit2) {
-        player.inventory.add(ITEM_COPPER_ORE, 10);
-    }
-    if keys.just_pressed(KeyCode::Digit3) {
-        player.inventory.add(ITEM_COAL, 10);
-    }
-    if keys.just_pressed(KeyCode::Digit4) {
-        player.inventory.add(ITEM_STONE, 10);
-    }
-    if keys.just_pressed(KeyCode::KeyQ) {
-        let _ = player.inventory.try_remove(ITEM_IRON_ORE, 1);
-    }
+    let _ = &mut player;
 }
 
 #[derive(SystemParam)]
@@ -1371,18 +1349,6 @@ struct Recipe {
     output_amount: u32,
     inputs: &'static [(ItemId, u32)],
 }
-
-const RECIPE_IRON_PLATE: Recipe = Recipe {
-    output: ITEM_IRON_PLATE,
-    output_amount: 1,
-    inputs: &[(ITEM_IRON_ORE, 1), (ITEM_COAL, 1)],
-};
-
-const RECIPE_COPPER_PLATE: Recipe = Recipe {
-    output: ITEM_COPPER_PLATE,
-    output_amount: 1,
-    inputs: &[(ITEM_COPPER_ORE, 1), (ITEM_COAL, 1)],
-};
 
 const RECIPE_FURNACE: Recipe = Recipe {
     output: ITEM_FURNACE,
