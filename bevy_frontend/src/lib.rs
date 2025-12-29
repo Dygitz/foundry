@@ -4,6 +4,7 @@ use bevy::image::ImageSampler;
 use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::MouseWheel;
 use bevy::input::ButtonInput;
+use bevy::log::{info, warn};
 use bevy::prelude::*;
 use bevy::render::camera::{OrthographicProjection, Projection};
 use bevy::window::{Window, WindowPlugin};
@@ -16,8 +17,9 @@ use persistence::{
     PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId, WorldStorage,
 };
 use simulation_core::{
-    Inventory, SimChunkData, SimChunkView, TileId, ITEM_COAL, ITEM_COPPER_ORE, ITEM_IRON_ORE,
-    ITEM_NONE, ITEM_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
+    Inventory, ItemId, ResourceCell, ResourceId, SimChunkData, SimChunkView, TileId, ITEM_COAL,
+    ITEM_COPPER_ORE, ITEM_IRON_ORE, ITEM_NONE, ITEM_STONE, RES_COAL, RES_COPPER, RES_IRON,
+    RES_NONE, RES_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
 };
 use web_storage_indexeddb::IndexedDbStorage;
 
@@ -34,6 +36,8 @@ pub fn run() {
         .insert_resource(PlayerState::default())
         .insert_resource(PlayerStateSaveState::default())
         .insert_resource(PlayerStateLoadState::default())
+        .insert_resource(ClickHighlight::default())
+        .insert_resource(DebugConfig::default())
         .insert_resource(EvictionStats::default())
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
@@ -68,6 +72,7 @@ pub fn run() {
                 player_movement_system,
                 player_visual_system,
                 inventory_debug_input_system,
+                mining_input_system,
                 inventory_text_system,
                 player_state_save_system,
                 camera_follow_system,
@@ -403,6 +408,22 @@ struct PlayerStateLoadState {
 }
 
 #[derive(Resource, Default)]
+struct ClickHighlight {
+    tile: Option<(i32, i32)>,
+}
+
+#[derive(Resource)]
+struct DebugConfig {
+    log_mining: bool,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self { log_mining: true }
+    }
+}
+
+#[derive(Resource, Default)]
 struct RecoveryState {
     task: Option<Task<Result<RecoveryReport, StorageError>>>,
     completed: bool,
@@ -502,6 +523,8 @@ fn player_movement_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<PlayerConfig>,
+    render_config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
     mut player_query: Query<(&mut Transform, &mut Velocity, &mut Facing), With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
@@ -524,8 +547,24 @@ fn player_movement_system(
     let delta = velocity.0 * time.delta_secs();
     for (mut transform, mut current_velocity, mut facing) in &mut player_query {
         *current_velocity = velocity;
-        transform.translation.x += delta.x;
-        transform.translation.y += delta.y;
+        let mut next = transform.translation;
+        let next_x = next.x + delta.x;
+        if can_walk(
+            Vec2::new(next_x, next.y),
+            &render_config,
+            session.world_seed,
+        ) {
+            next.x = next_x;
+        }
+        let next_y = next.y + delta.y;
+        if can_walk(
+            Vec2::new(next.x, next_y),
+            &render_config,
+            session.world_seed,
+        ) {
+            next.y = next_y;
+        }
+        transform.translation = next;
         if raw_direction != Vec2::ZERO {
             if raw_direction.x.abs() >= raw_direction.y.abs() {
                 *facing = if raw_direction.x > 0.0 {
@@ -570,6 +609,295 @@ fn inventory_debug_input_system(keys: Res<ButtonInput<KeyCode>>, mut player: Res
     if keys.just_pressed(KeyCode::KeyQ) {
         let _ = player.inventory.try_remove(ITEM_IRON_ORE, 1);
     }
+}
+
+fn mining_input_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    player_query: Query<&Transform, With<Player>>,
+    mut images: ResMut<Assets<Image>>,
+    services: NonSend<StorageServices>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    debug: Res<DebugConfig>,
+    mut highlight: ResMut<ClickHighlight>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if debug.log_mining {
+        info!("mine click");
+    }
+
+    let Ok(window) = windows.single() else {
+        if debug.log_mining {
+            warn!("mine click: missing window");
+        }
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        if debug.log_mining {
+            warn!("mine click: no cursor position");
+        }
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        if debug.log_mining {
+            warn!("mine click: missing camera");
+        }
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        if debug.log_mining {
+            warn!("mine click: viewport_to_world_2d failed");
+        }
+        return;
+    };
+
+    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
+    let previous_highlight = highlight.tile;
+    highlight.tile = Some((tile_x, tile_y));
+    if let Some((prev_x, prev_y)) = previous_highlight {
+        refresh_highlight_chunk(
+            prev_x,
+            prev_y,
+            &config,
+            &session,
+            &runtime,
+            &mut images,
+            highlight.tile,
+        );
+    }
+    refresh_highlight_chunk(
+        tile_x,
+        tile_y,
+        &config,
+        &session,
+        &runtime,
+        &mut images,
+        highlight.tile,
+    );
+
+    let mut mined = try_mine_at_world_pos(
+        world_pos,
+        &config,
+        &session,
+        &mut runtime,
+        &mut player,
+        &mut images,
+        &services,
+        &time,
+        &mut queue,
+        &mut status,
+        debug.log_mining,
+        highlight.tile,
+    );
+
+    if !mined {
+        if let Ok(player_transform) = player_query.single() {
+            let player_pos = player_transform.translation.truncate();
+            if player_pos.distance(world_pos) <= config.tile_size * 0.75 {
+                mined = try_mine_at_world_pos(
+                    player_pos,
+                    &config,
+                    &session,
+                    &mut runtime,
+                    &mut player,
+                    &mut images,
+                    &services,
+                    &time,
+                    &mut queue,
+                    &mut status,
+                    debug.log_mining,
+                    highlight.tile,
+                );
+            }
+        }
+    }
+
+    if debug.log_mining && !mined {
+        info!("mine result: no ore mined");
+    }
+}
+
+fn resource_to_item(kind: ResourceId) -> Option<ItemId> {
+    match kind {
+        RES_IRON => Some(ITEM_IRON_ORE),
+        RES_COPPER => Some(ITEM_COPPER_ORE),
+        RES_COAL => Some(ITEM_COAL),
+        RES_STONE => Some(ITEM_STONE),
+        _ => None,
+    }
+}
+
+fn refresh_highlight_chunk(
+    tile_x: i32,
+    tile_y: i32,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &WorldRuntime,
+    images: &mut Assets<Image>,
+    highlight: Option<(i32, i32)>,
+) {
+    let (coord, _, _) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    if let Some(loaded) = runtime.loaded.get(&key) {
+        refresh_chunk_texture(
+            images,
+            &loaded.texture_handle,
+            &loaded.data,
+            config,
+            session.world_seed,
+            highlight,
+        );
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum MineAttempt {
+    Mined(ResourceId),
+    Empty,
+    ChunkMissing,
+}
+
+impl MineAttempt {
+    fn is_mined(self) -> bool {
+        matches!(self, MineAttempt::Mined(_))
+    }
+}
+
+fn try_mine_at_world_pos(
+    world_pos: Vec2,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &mut WorldRuntime,
+    player: &mut PlayerState,
+    images: &mut Assets<Image>,
+    services: &StorageServices,
+    time: &Time,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+    log: bool,
+    highlight: Option<(i32, i32)>,
+) -> bool {
+    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
+    let mined = try_mine_tile(
+        tile_x,
+        tile_y,
+        config,
+        session,
+        runtime,
+        player,
+        images,
+        services,
+        time,
+        queue,
+        status,
+        log,
+        highlight,
+    )
+    .is_mined();
+    if log {
+        info!(
+            "mine attempt: world=({:.2},{:.2}) tile=({},{}) mined={}",
+            world_pos.x, world_pos.y, tile_x, tile_y, mined
+        );
+    }
+    mined
+}
+
+fn try_mine_tile(
+    tile_x: i32,
+    tile_y: i32,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &mut WorldRuntime,
+    player: &mut PlayerState,
+    images: &mut Assets<Image>,
+    services: &StorageServices,
+    time: &Time,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+    log: bool,
+    highlight: Option<(i32, i32)>,
+) -> MineAttempt {
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    let (texture_handle, data_snapshot, mined_kind) = {
+        let Some(loaded) = runtime.loaded.get_mut(&key) else {
+            if log {
+                info!("mine miss: chunk not loaded {:?}", key);
+            }
+            return MineAttempt::ChunkMissing;
+        };
+        let edge = CHUNK_EDGE as i32;
+        let idx = (local_y as usize) * (edge as usize) + (local_x as usize);
+        let Some(cell) = loaded.data.resources.get_mut(idx) else {
+            if log {
+                info!("mine miss: no resource cell at {}/{}", local_x, local_y);
+            }
+            return MineAttempt::Empty;
+        };
+        if cell.amount == 0 || cell.kind == RES_NONE {
+            if log {
+                info!(
+                    "mine miss: empty ore at chunk=({},{}) local=({},{}) kind={} amt={}",
+                    coord.cx, coord.cy, local_x, local_y, cell.kind, cell.amount
+                );
+            }
+            return MineAttempt::Empty;
+        }
+
+        let mined_kind = cell.kind;
+        cell.amount = cell.amount.saturating_sub(1);
+        if cell.amount == 0 {
+            cell.kind = RES_NONE;
+        }
+
+        (
+            loaded.texture_handle.clone(),
+            loaded.data.clone(),
+            mined_kind,
+        )
+    };
+
+    if let Some(item) = resource_to_item(mined_kind) {
+        player.inventory.add(item, 1);
+    }
+    runtime.touch(&key);
+    refresh_chunk_texture(
+        images,
+        &texture_handle,
+        &data_snapshot,
+        config,
+        session.world_seed,
+        highlight,
+    );
+    queue_chunk_save(
+        &key,
+        &data_snapshot,
+        services,
+        session,
+        time,
+        runtime,
+        queue,
+        status,
+    );
+    if log {
+        info!(
+            "mine hit: chunk=({},{}) local=({},{}) kind={}",
+            coord.cx, coord.cy, local_x, local_y, mined_kind
+        );
+    }
+    MineAttempt::Mined(mined_kind)
 }
 
 fn inventory_text_system(
@@ -862,8 +1190,14 @@ fn autosave_flush_system(
                         queue.pending.pop_front();
                     }
                     for key in save_task.keys {
-                        runtime.queued_for_save.remove(&key);
-                        runtime.dirty.remove(&key);
+                        let still_pending = queue.pending.iter().any(|record| record.key == key);
+                        if still_pending {
+                            runtime.queued_for_save.insert(key.clone());
+                            runtime.dirty.insert(key.clone());
+                        } else {
+                            runtime.queued_for_save.remove(&key);
+                            runtime.dirty.remove(&key);
+                        }
                     }
                     status.mark_ok();
                 }
@@ -999,6 +1333,7 @@ fn chunk_loaded_system(
     time: Res<Time>,
     mut queue: ResMut<SaveQueue>,
     mut status: ResMut<StorageStatus>,
+    highlight: Res<ClickHighlight>,
 ) {
     for event in loaded_events.read() {
         let data = match &event.data {
@@ -1043,7 +1378,12 @@ fn chunk_loaded_system(
             continue;
         }
 
-        let texture_handle = images.add(build_chunk_image(&data, &config, session.world_seed));
+        let texture_handle = images.add(build_chunk_image(
+            &data,
+            &config,
+            session.world_seed,
+            highlight.tile,
+        ));
         let chunk_size = chunk_world_size(&config);
         let center = chunk_center_world(data.coord, chunk_size);
         let entity = commands
@@ -1051,6 +1391,7 @@ fn chunk_loaded_system(
                 Sprite {
                     image: texture_handle.clone(),
                     custom_size: Some(Vec2::splat(chunk_size)),
+                    rect: Some(chunk_sprite_rect()),
                     ..default()
                 },
                 Transform::from_translation(Vec3::new(center.x, center.y, 0.0)),
@@ -1067,6 +1408,41 @@ fn chunk_loaded_system(
             },
         );
         runtime.touch(&event.key);
+    }
+}
+
+fn queue_chunk_save(
+    key: &ChunkKey,
+    data: &SimChunkData,
+    services: &StorageServices,
+    session: &WorldSession,
+    time: &Time,
+    runtime: &mut WorldRuntime,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+) {
+    let view = SimChunkView::from_data(data);
+    match services.codec.encode(&view, session.tick) {
+        Ok(blob) => {
+            let updated_at_ms = time.elapsed().as_millis() as u64;
+            if let Some(existing) = queue.pending.iter_mut().find(|record| record.key == *key) {
+                existing.blob = blob;
+                existing.tick_saved = session.tick;
+                existing.checksum = 0;
+                existing.updated_at_ms = updated_at_ms;
+            } else {
+                queue.pending.push_back(ChunkRecordWrite {
+                    key: key.clone(),
+                    blob,
+                    tick_saved: session.tick,
+                    checksum: 0,
+                    updated_at_ms,
+                });
+            }
+            runtime.queued_for_save.insert(key.clone());
+            runtime.mark_dirty(key.clone());
+        }
+        Err(error) => status.record_error(&error),
     }
 }
 
@@ -1200,12 +1576,125 @@ fn generate_chunk_data(
             tiles.push(tile);
         }
     }
+    let resources = generate_resources(coord, layer, world_seed, &tiles);
     SimChunkData {
         coord,
         layer,
         tiles,
+        resources,
         entities: Vec::new(),
         saved_tick,
+    }
+}
+
+fn generate_resources(
+    coord: ChunkCoord,
+    layer: ChunkLayer,
+    world_seed: u64,
+    tiles: &[TileId],
+) -> Vec<ResourceCell> {
+    let edge = CHUNK_EDGE as usize;
+    let base_x = coord.cx * CHUNK_EDGE as i32;
+    let base_y = coord.cy * CHUNK_EDGE as i32;
+    let mut resources = Vec::with_capacity(CHUNK_TILE_COUNT);
+
+    for y in 0..edge {
+        for x in 0..edge {
+            let idx = y * edge + x;
+            if tiles.get(idx).copied().map(is_water).unwrap_or(false) {
+                resources.push(ResourceCell {
+                    kind: RES_NONE,
+                    amount: 0,
+                });
+                continue;
+            }
+            let gx = base_x + x as i32;
+            let gy = base_y + y as i32;
+            resources.push(resource_at_global(gx, gy, layer, world_seed));
+        }
+    }
+
+    resources
+}
+
+fn pick_resource_kind(value: u32) -> ResourceId {
+    let roll = value % 100;
+    if roll < 40 {
+        RES_IRON
+    } else if roll < 65 {
+        RES_COPPER
+    } else if roll < 85 {
+        RES_COAL
+    } else {
+        RES_STONE
+    }
+}
+
+fn resource_at_global(gx: i32, gy: i32, layer: ChunkLayer, world_seed: u64) -> ResourceCell {
+    const ORE_CELL_SIZE: i32 = 48;
+    const ORE_MIN_RADIUS: i32 = 4;
+    const ORE_MAX_RADIUS: i32 = 8;
+    const ORE_PATCH_CHANCE: u32 = 30;
+    const ORE_CELL_MARGIN: i32 = ORE_MAX_RADIUS + 1;
+
+    let max_offset = ORE_CELL_SIZE - (ORE_CELL_MARGIN * 2);
+    if max_offset <= 0 {
+        return ResourceCell {
+            kind: RES_NONE,
+            amount: 0,
+        };
+    }
+
+    let seed = world_seed ^ (layer as u64).wrapping_mul(0x7f4a7c15d14b5b5d);
+    let cell_x = gx.div_euclid(ORE_CELL_SIZE);
+    let cell_y = gy.div_euclid(ORE_CELL_SIZE);
+    let mut best_amount = 0u16;
+    let mut best_kind = RES_NONE;
+
+    for cy in (cell_y - 1)..=(cell_y + 1) {
+        for cx in (cell_x - 1)..=(cell_x + 1) {
+            let cell_seed = mix64(
+                seed ^ (cx as i64 as u64).wrapping_mul(0x9e3779b97f4a7c15)
+                    ^ (cy as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f),
+            );
+            if (cell_seed as u32 % 100) >= ORE_PATCH_CHANCE {
+                continue;
+            }
+
+            let kind = pick_resource_kind(((cell_seed >> 8) as u32) % 100);
+            let offset_x = ((cell_seed >> 16) as u32 % max_offset as u32) as i32;
+            let offset_y = ((cell_seed >> 24) as u32 % max_offset as u32) as i32;
+            let center_x = cx * ORE_CELL_SIZE + ORE_CELL_MARGIN + offset_x;
+            let center_y = cy * ORE_CELL_SIZE + ORE_CELL_MARGIN + offset_y;
+            let radius_range = (ORE_MAX_RADIUS - ORE_MIN_RADIUS + 1) as u32;
+            let radius = ORE_MIN_RADIUS + ((cell_seed >> 32) as u32 % radius_range) as i32;
+            let base_amount = 18 + ((cell_seed >> 40) as u32 % 60) as i32;
+            let dx = gx - center_x;
+            let dy = gy - center_y;
+            let dist_sq = dx * dx + dy * dy;
+            let radius_sq = radius * radius;
+            if dist_sq > radius_sq {
+                continue;
+            }
+            let falloff = (dist_sq * base_amount) / (radius_sq + 1);
+            let amount = (base_amount - falloff).max(0) as u16;
+            if amount > best_amount {
+                best_amount = amount;
+                best_kind = kind;
+            }
+        }
+    }
+
+    if best_amount == 0 {
+        ResourceCell {
+            kind: RES_NONE,
+            amount: 0,
+        }
+    } else {
+        ResourceCell {
+            kind: best_kind,
+            amount: best_amount,
+        }
     }
 }
 
@@ -1306,6 +1795,15 @@ fn world_to_chunk_coord(world_pos: Vec2, chunk_size: f32) -> ChunkCoord {
     )
 }
 
+fn tile_to_chunk_local(tile_x: i32, tile_y: i32) -> (ChunkCoord, i32, i32) {
+    let edge = CHUNK_EDGE as i32;
+    let cx = tile_x.div_euclid(edge);
+    let cy = tile_y.div_euclid(edge);
+    let local_x = tile_x.rem_euclid(edge);
+    let local_y = tile_y.rem_euclid(edge);
+    (ChunkCoord::new(cx, cy), local_x, local_y)
+}
+
 fn chunk_center_world(coord: ChunkCoord, chunk_size: f32) -> Vec2 {
     Vec2::new(
         (coord.cx as f32 + 0.5) * chunk_size,
@@ -1386,8 +1884,9 @@ fn build_chunk_image(
     data: &SimChunkData,
     config: &WorldRenderConfig,
     world_seed: u64,
+    highlight: Option<(i32, i32)>,
 ) -> Image {
-    let pixels = chunk_pixels(data, config, world_seed);
+    let pixels = chunk_pixels(data, config, world_seed, highlight);
     let padded_edge = CHUNK_EDGE as u32 + 2;
     let mut image = Image::new_fill(
         Extent3d {
@@ -1404,19 +1903,43 @@ fn build_chunk_image(
     image
 }
 
-fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig, world_seed: u64) -> Vec<u8> {
+fn chunk_sprite_rect() -> Rect {
+    let edge = CHUNK_EDGE as f32;
+    Rect::from_corners(Vec2::new(1.0, 1.0), Vec2::new(edge + 1.0, edge + 1.0))
+}
+
+fn refresh_chunk_texture(
+    images: &mut Assets<Image>,
+    handle: &Handle<Image>,
+    data: &SimChunkData,
+    config: &WorldRenderConfig,
+    world_seed: u64,
+    highlight: Option<(i32, i32)>,
+) {
+    if let Some(image) = images.get_mut(handle) {
+        *image = build_chunk_image(data, config, world_seed, highlight);
+    }
+}
+
+fn chunk_pixels(
+    data: &SimChunkData,
+    config: &WorldRenderConfig,
+    world_seed: u64,
+    highlight: Option<(i32, i32)>,
+) -> Vec<u8> {
     let edge = CHUNK_EDGE as usize;
     let padded_edge = edge + 2;
     let mut pixels = Vec::with_capacity(padded_edge * padded_edge * 4);
 
     for oy in 0..padded_edge {
-        let ty = if oy == 0 {
+        let base_ty = if oy == 0 {
             0
         } else if oy > edge {
             edge - 1
         } else {
             oy - 1
         };
+        let ty = edge - 1 - base_ty;
         let interior_y = oy as i32 - 1;
         for ox in 0..padded_edge {
             let tx = if ox == 0 {
@@ -1446,12 +1969,22 @@ fn chunk_pixels(data: &SimChunkData, config: &WorldRenderConfig, world_seed: u64
             let gy = data.coord.cy * CHUNK_EDGE as i32 + ty as i32;
             let jitter = tile_jitter(gx, gy, world_seed, tile);
             color = apply_jitter(color, jitter);
+            let resource = resource_at(data, tx as i32, ty as i32);
+            if resource.kind != RES_NONE && resource.amount > 0 {
+                let overlay = resource_color(resource.kind);
+                color = blend_color(color, overlay, 0.85);
+            }
             if config.show_chunk_borders
                 && interior_x >= 0
                 && interior_y >= 0
                 && (interior_x == 0 || interior_y == 0)
             {
                 color = darken_color(color);
+            }
+            if let Some((hx, hy)) = highlight {
+                if gx == hx && gy == hy {
+                    color = [220, 40, 40, 255];
+                }
             }
             pixels.extend_from_slice(&color);
         }
@@ -1476,11 +2009,31 @@ fn shallow_water_color() -> [u8; 4] {
     [70, 120, 190, 255]
 }
 
+fn resource_color(kind: ResourceId) -> [u8; 4] {
+    match kind {
+        RES_IRON => [180, 180, 190, 255],
+        RES_COPPER => [190, 120, 60, 255],
+        RES_COAL => [30, 30, 30, 255],
+        RES_STONE => [120, 120, 120, 255],
+        _ => [0, 0, 0, 0],
+    }
+}
+
 fn darken_color(color: [u8; 4]) -> [u8; 4] {
     let r = (color[0] as u16 * 4 / 5) as u8;
     let g = (color[1] as u16 * 4 / 5) as u8;
     let b = (color[2] as u16 * 4 / 5) as u8;
     [r, g, b, color[3]]
+}
+
+fn blend_color(base: [u8; 4], overlay: [u8; 4], overlay_weight: f32) -> [u8; 4] {
+    let t = overlay_weight.clamp(0.0, 1.0);
+    let blend = |b: u8, o: u8| -> u8 {
+        let bf = b as f32;
+        let of = o as f32;
+        (bf * (1.0 - t) + of * t).round().clamp(0.0, 255.0) as u8
+    };
+    [blend(base[0], overlay[0]), blend(base[1], overlay[1]), blend(base[2], overlay[2]), base[3]]
 }
 
 fn apply_jitter(color: [u8; 4], jitter: i8) -> [u8; 4] {
@@ -1510,8 +2063,34 @@ fn tile_at(data: &SimChunkData, tx: i32, ty: i32, world_seed: u64) -> TileId {
     terrain_tile_id(gx, gy, data.layer, world_seed)
 }
 
+fn resource_at(data: &SimChunkData, tx: i32, ty: i32) -> ResourceCell {
+    let edge = CHUNK_EDGE as i32;
+    if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
+        let idx = (ty as usize) * (edge as usize) + (tx as usize);
+        return data
+            .resources
+            .get(idx)
+            .copied()
+            .unwrap_or(ResourceCell {
+                kind: RES_NONE,
+                amount: 0,
+            });
+    }
+    ResourceCell {
+        kind: RES_NONE,
+        amount: 0,
+    }
+}
+
 fn is_water(tile: TileId) -> bool {
     tile == WATER_TILE
+}
+
+fn can_walk(world_pos: Vec2, config: &WorldRenderConfig, world_seed: u64) -> bool {
+    let tx = (world_pos.x / config.tile_size).floor() as i32;
+    let ty = (world_pos.y / config.tile_size).floor() as i32;
+    let tile = terrain_tile_id(tx, ty, config.layer, world_seed);
+    !is_water(tile)
 }
 
 const WATER_TILE: TileId = 6;

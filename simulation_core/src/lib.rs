@@ -17,6 +17,19 @@ pub const CHUNK_TILE_COUNT: usize = (CHUNK_EDGE as usize) * (CHUNK_EDGE as usize
 
 pub type TileId = u16;
 pub type EntityKind = u16;
+pub type ResourceId = u8;
+
+pub const RES_NONE: ResourceId = 0;
+pub const RES_IRON: ResourceId = 1;
+pub const RES_COPPER: ResourceId = 2;
+pub const RES_COAL: ResourceId = 3;
+pub const RES_STONE: ResourceId = 4;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ResourceCell {
+    pub kind: ResourceId,
+    pub amount: u16,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Entity {
@@ -31,6 +44,7 @@ pub struct SimChunkData {
     pub coord: ChunkCoord,
     pub layer: ChunkLayer,
     pub tiles: Vec<TileId>,
+    pub resources: Vec<ResourceCell>,
     pub entities: Vec<Entity>,
     pub saved_tick: u64,
 }
@@ -40,6 +54,7 @@ pub struct SimChunkView<'a> {
     pub coord: ChunkCoord,
     pub layer: ChunkLayer,
     pub tiles: &'a [TileId],
+    pub resources: &'a [ResourceCell],
     pub entities: &'a [Entity],
 }
 
@@ -49,6 +64,7 @@ impl<'a> SimChunkView<'a> {
             coord: data.coord,
             layer: data.layer,
             tiles: &data.tiles,
+            resources: &data.resources,
             entities: &data.entities,
         }
     }
