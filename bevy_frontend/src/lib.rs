@@ -17,9 +17,11 @@ use persistence::{
     PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId, WorldStorage,
 };
 use simulation_core::{
-    Inventory, ItemId, ResourceCell, ResourceId, SimChunkData, SimChunkView, TileId, ITEM_COAL,
-    ITEM_COPPER_ORE, ITEM_IRON_ORE, ITEM_NONE, ITEM_STONE, RES_COAL, RES_COPPER, RES_IRON,
-    RES_NONE, RES_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
+    Inventory, ItemId, PlacedCell, PlacedId, ResourceCell, ResourceId, SimChunkData, SimChunkView,
+    TileId, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE,
+    ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE, PLACED_CHEST, PLACED_FURNACE,
+    PLACED_NONE, RES_COAL, RES_COPPER, RES_IRON, RES_NONE, RES_STONE, CHUNK_EDGE,
+    CHUNK_TILE_COUNT,
 };
 use web_storage_indexeddb::IndexedDbStorage;
 
@@ -36,6 +38,8 @@ pub fn run() {
         .insert_resource(PlayerState::default())
         .insert_resource(PlayerStateSaveState::default())
         .insert_resource(PlayerStateLoadState::default())
+        .insert_resource(CraftMenuState::default())
+        .insert_resource(PlacementState::default())
         .insert_resource(ClickHighlight::default())
         .insert_resource(DebugConfig::default())
         .insert_resource(EvictionStats::default())
@@ -71,9 +75,14 @@ pub fn run() {
                 world_runtime_frame_counter_system,
                 player_movement_system,
                 player_visual_system,
+                craft_menu_toggle_system,
+                placement_select_system,
                 inventory_debug_input_system,
+                crafting_input_system,
                 mining_input_system,
                 inventory_text_system,
+                placement_text_system,
+                craft_menu_text_system,
                 player_state_save_system,
                 camera_follow_system,
                 camera_zoom_system,
@@ -366,6 +375,12 @@ struct WorldStatsText;
 struct InventoryText;
 
 #[derive(Component)]
+struct CraftMenuText;
+
+#[derive(Component)]
+struct PlacementText;
+
+#[derive(Component)]
 struct Player;
 
 #[derive(Component, Copy, Clone)]
@@ -382,6 +397,16 @@ enum Facing {
 #[derive(Resource, Default)]
 struct PlayerState {
     inventory: Inventory,
+}
+
+#[derive(Resource, Default)]
+struct CraftMenuState {
+    open: bool,
+}
+
+#[derive(Resource, Default)]
+struct PlacementState {
+    selected: Option<ItemId>,
 }
 
 #[derive(Resource)]
@@ -499,7 +524,10 @@ fn setup(
         WorldStatsText,
     ));
     commands.spawn((
-        Text::new("Inventory: Iron 0 | Copper 0 | Coal 0 | Stone 0"),
+        Text::new(
+            "Inventory: Iron Ore 0 | Copper Ore 0 | Coal 0 | Stone 0\n\
+Plates: Iron 0 | Copper 0 | Furnace 0 | Chest 0",
+        ),
         TextFont {
             font_size: 16.0,
             ..default()
@@ -512,6 +540,36 @@ fn setup(
             ..default()
         },
         InventoryText,
+    ));
+    commands.spawn((
+        Text::new("Crafting (E to open)"),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(12.0),
+            top: Val::Px(12.0),
+            ..default()
+        },
+        CraftMenuText,
+    ));
+    commands.spawn((
+        Text::new("Place: None (F furnace, C chest, Esc clear)"),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(116.0),
+            ..default()
+        },
+        PlacementText,
     ));
 }
 
@@ -593,7 +651,62 @@ fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Pla
     }
 }
 
-fn inventory_debug_input_system(keys: Res<ButtonInput<KeyCode>>, mut player: ResMut<PlayerState>) {
+fn craft_menu_toggle_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut menu: ResMut<CraftMenuState>,
+) {
+    if !keys.just_pressed(KeyCode::KeyE) {
+        return;
+    }
+    menu.open = !menu.open;
+}
+
+fn placement_select_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut placement: ResMut<PlacementState>,
+) {
+    if keys.just_pressed(KeyCode::KeyF) {
+        placement.selected = Some(ITEM_FURNACE);
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        placement.selected = Some(ITEM_CHEST);
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        placement.selected = None;
+    }
+}
+
+fn crafting_input_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    menu: Res<CraftMenuState>,
+    mut player: ResMut<PlayerState>,
+) {
+    if !menu.open {
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Digit1) {
+        let _ = try_craft(&mut player.inventory, &RECIPE_IRON_PLATE);
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        let _ = try_craft(&mut player.inventory, &RECIPE_COPPER_PLATE);
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        let _ = try_craft(&mut player.inventory, &RECIPE_FURNACE);
+    }
+    if keys.just_pressed(KeyCode::Digit4) {
+        let _ = try_craft(&mut player.inventory, &RECIPE_CHEST);
+    }
+}
+
+fn inventory_debug_input_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    menu: Res<CraftMenuState>,
+    mut player: ResMut<PlayerState>,
+) {
+    if menu.open {
+        return;
+    }
     if keys.just_pressed(KeyCode::Digit1) {
         player.inventory.add(ITEM_IRON_ORE, 10);
     }
@@ -620,6 +733,7 @@ fn mining_input_system(
     mut runtime: ResMut<WorldRuntime>,
     mut player: ResMut<PlayerState>,
     player_query: Query<&Transform, With<Player>>,
+    mut placement: ResMut<PlacementState>,
     mut images: ResMut<Assets<Image>>,
     services: NonSend<StorageServices>,
     time: Res<Time>,
@@ -685,6 +799,30 @@ fn mining_input_system(
         highlight.tile,
     );
 
+    if let Some(item) = placement.selected {
+        let placed = try_place_at_world_pos(
+            world_pos,
+            item,
+            &config,
+            &session,
+            &mut runtime,
+            &mut player,
+            &mut images,
+            &services,
+            &time,
+            &mut queue,
+            &mut status,
+            highlight.tile,
+        );
+        if placed && player.inventory.count(item) == 0 {
+            placement.selected = None;
+        }
+        if !placed && player.inventory.count(item) == 0 {
+            placement.selected = None;
+        }
+        return;
+    }
+
     let mut mined = try_mine_at_world_pos(
         world_pos,
         &config,
@@ -734,6 +872,63 @@ fn resource_to_item(kind: ResourceId) -> Option<ItemId> {
         RES_COAL => Some(ITEM_COAL),
         RES_STONE => Some(ITEM_STONE),
         _ => None,
+    }
+}
+
+struct Recipe {
+    output: ItemId,
+    output_amount: u32,
+    inputs: &'static [(ItemId, u32)],
+}
+
+const RECIPE_IRON_PLATE: Recipe = Recipe {
+    output: ITEM_IRON_PLATE,
+    output_amount: 1,
+    inputs: &[(ITEM_IRON_ORE, 1), (ITEM_COAL, 1)],
+};
+
+const RECIPE_COPPER_PLATE: Recipe = Recipe {
+    output: ITEM_COPPER_PLATE,
+    output_amount: 1,
+    inputs: &[(ITEM_COPPER_ORE, 1), (ITEM_COAL, 1)],
+};
+
+const RECIPE_FURNACE: Recipe = Recipe {
+    output: ITEM_FURNACE,
+    output_amount: 1,
+    inputs: &[(ITEM_STONE, 10)],
+};
+
+const RECIPE_CHEST: Recipe = Recipe {
+    output: ITEM_CHEST,
+    output_amount: 1,
+    inputs: &[(ITEM_STONE, 10)],
+};
+
+fn try_craft(inv: &mut Inventory, recipe: &Recipe) -> bool {
+    for (item, amount) in recipe.inputs {
+        if inv.count(*item) < *amount {
+            return false;
+        }
+    }
+    for (item, amount) in recipe.inputs {
+        let _ = inv.try_remove(*item, *amount);
+    }
+    inv.add(recipe.output, recipe.output_amount);
+    true
+}
+
+fn item_name(item: ItemId) -> &'static str {
+    match item {
+        ITEM_IRON_ORE => "Iron Ore",
+        ITEM_COPPER_ORE => "Copper Ore",
+        ITEM_COAL => "Coal",
+        ITEM_STONE => "Stone",
+        ITEM_IRON_PLATE => "Iron Plate",
+        ITEM_COPPER_PLATE => "Copper Plate",
+        ITEM_FURNACE => "Furnace",
+        ITEM_CHEST => "Chest",
+        _ => "Unknown",
     }
 }
 
@@ -900,6 +1095,119 @@ fn try_mine_tile(
     MineAttempt::Mined(mined_kind)
 }
 
+fn item_to_placed_kind(item: ItemId) -> Option<PlacedId> {
+    match item {
+        ITEM_FURNACE => Some(PLACED_FURNACE),
+        ITEM_CHEST => Some(PLACED_CHEST),
+        _ => None,
+    }
+}
+
+fn try_place_at_world_pos(
+    world_pos: Vec2,
+    item: ItemId,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &mut WorldRuntime,
+    player: &mut PlayerState,
+    images: &mut Assets<Image>,
+    services: &StorageServices,
+    time: &Time,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+    highlight: Option<(i32, i32)>,
+) -> bool {
+    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
+    try_place_tile(
+        tile_x,
+        tile_y,
+        item,
+        config,
+        session,
+        runtime,
+        player,
+        images,
+        services,
+        time,
+        queue,
+        status,
+        highlight,
+    )
+}
+
+fn try_place_tile(
+    tile_x: i32,
+    tile_y: i32,
+    item: ItemId,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &mut WorldRuntime,
+    player: &mut PlayerState,
+    images: &mut Assets<Image>,
+    services: &StorageServices,
+    time: &Time,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+    highlight: Option<(i32, i32)>,
+) -> bool {
+    let Some(placed_kind) = item_to_placed_kind(item) else {
+        return false;
+    };
+    if player.inventory.count(item) == 0 {
+        return false;
+    }
+
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    let (texture_handle, data_snapshot) = {
+        let Some(loaded) = runtime.loaded.get_mut(&key) else {
+            return false;
+        };
+        let edge = CHUNK_EDGE as i32;
+        let idx = (local_y as usize) * (edge as usize) + (local_x as usize);
+        let tile = tile_at(&loaded.data, local_x, local_y, session.world_seed);
+        if is_water(tile) {
+            return false;
+        }
+        let Some(cell) = loaded.data.placed.get_mut(idx) else {
+            return false;
+        };
+        if cell.kind != PLACED_NONE {
+            return false;
+        }
+        if !player.inventory.try_remove(item, 1) {
+            return false;
+        }
+        cell.kind = placed_kind;
+        (
+            loaded.texture_handle.clone(),
+            loaded.data.clone(),
+        )
+    };
+
+    runtime.touch(&key);
+    refresh_chunk_texture(
+        images,
+        &texture_handle,
+        &data_snapshot,
+        config,
+        session.world_seed,
+        highlight,
+    );
+    queue_chunk_save(
+        &key,
+        &data_snapshot,
+        services,
+        session,
+        time,
+        runtime,
+        queue,
+        status,
+    );
+    true
+}
+
 fn inventory_text_system(
     player: Res<PlayerState>,
     mut query: Query<&mut Text, With<InventoryText>>,
@@ -909,12 +1217,64 @@ fn inventory_text_system(
     }
     let inv = &player.inventory;
     let label = format!(
-        "Inventory: Iron {} | Copper {} | Coal {} | Stone {}",
+        "Inventory: Iron Ore {} | Copper Ore {} | Coal {} | Stone {}\nPlates: Iron {} | Copper {} | Furnace {} | Chest {}",
         inv.count(ITEM_IRON_ORE),
         inv.count(ITEM_COPPER_ORE),
         inv.count(ITEM_COAL),
         inv.count(ITEM_STONE),
+        inv.count(ITEM_IRON_PLATE),
+        inv.count(ITEM_COPPER_PLATE),
+        inv.count(ITEM_FURNACE),
+        inv.count(ITEM_CHEST),
     );
+    for mut text in &mut query {
+        *text = Text::new(label.clone());
+    }
+}
+
+fn craft_menu_text_system(
+    menu: Res<CraftMenuState>,
+    mut query: Query<&mut Text, With<CraftMenuText>>,
+) {
+    if !menu.is_changed() {
+        return;
+    }
+    let label = if menu.open {
+        "Crafting (E to close)\n\
+1) Iron Plate: 1 Iron Ore + 1 Coal\n\
+2) Copper Plate: 1 Copper Ore + 1 Coal\n\
+3) Furnace: 10 Stone\n\
+4) Chest: 10 Stone"
+    } else {
+        "Crafting (E to open)"
+    };
+    for mut text in &mut query {
+        *text = Text::new(label.to_string());
+    }
+}
+
+fn placement_text_system(
+    player: Res<PlayerState>,
+    mut placement: ResMut<PlacementState>,
+    mut query: Query<&mut Text, With<PlacementText>>,
+) {
+    if !player.is_changed() && !placement.is_changed() {
+        return;
+    }
+    if let Some(item) = placement.selected {
+        if player.inventory.count(item) == 0 {
+            placement.selected = None;
+        }
+    }
+    let label = if let Some(item) = placement.selected {
+        format!(
+            "Place: {} x{} (F furnace, C chest, Esc clear)",
+            item_name(item),
+            player.inventory.count(item)
+        )
+    } else {
+        "Place: None (F furnace, C chest, Esc clear)".to_string()
+    };
     for mut text in &mut query {
         *text = Text::new(label.clone());
     }
@@ -1577,11 +1937,13 @@ fn generate_chunk_data(
         }
     }
     let resources = generate_resources(coord, layer, world_seed, &tiles);
+    let placed = vec![PlacedCell { kind: PLACED_NONE }; CHUNK_TILE_COUNT];
     SimChunkData {
         coord,
         layer,
         tiles,
         resources,
+        placed,
         entities: Vec::new(),
         saved_tick,
     }
@@ -1974,6 +2336,11 @@ fn chunk_pixels(
                 let overlay = resource_color(resource.kind);
                 color = blend_color(color, overlay, 0.85);
             }
+            let placed = placed_at(data, tx as i32, ty as i32);
+            if placed.kind != PLACED_NONE {
+                let overlay = placed_color(placed.kind);
+                color = blend_color(color, overlay, 0.9);
+            }
             if config.show_chunk_borders
                 && interior_x >= 0
                 && interior_y >= 0
@@ -2015,6 +2382,14 @@ fn resource_color(kind: ResourceId) -> [u8; 4] {
         RES_COPPER => [190, 120, 60, 255],
         RES_COAL => [30, 30, 30, 255],
         RES_STONE => [120, 120, 120, 255],
+        _ => [0, 0, 0, 0],
+    }
+}
+
+fn placed_color(kind: PlacedId) -> [u8; 4] {
+    match kind {
+        PLACED_FURNACE => [90, 90, 100, 255],
+        PLACED_CHEST => [150, 95, 55, 255],
         _ => [0, 0, 0, 0],
     }
 }
@@ -2080,6 +2455,19 @@ fn resource_at(data: &SimChunkData, tx: i32, ty: i32) -> ResourceCell {
         kind: RES_NONE,
         amount: 0,
     }
+}
+
+fn placed_at(data: &SimChunkData, tx: i32, ty: i32) -> PlacedCell {
+    let edge = CHUNK_EDGE as i32;
+    if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
+        let idx = (ty as usize) * (edge as usize) + (tx as usize);
+        return data
+            .placed
+            .get(idx)
+            .copied()
+            .unwrap_or(PlacedCell { kind: PLACED_NONE });
+    }
+    PlacedCell { kind: PLACED_NONE }
 }
 
 fn is_water(tile: TileId) -> bool {

@@ -7,6 +7,10 @@ pub const ITEM_IRON_ORE: ItemId = 1;
 pub const ITEM_COPPER_ORE: ItemId = 2;
 pub const ITEM_COAL: ItemId = 3;
 pub const ITEM_STONE: ItemId = 4;
+pub const ITEM_IRON_PLATE: ItemId = 5;
+pub const ITEM_COPPER_PLATE: ItemId = 6;
+pub const ITEM_FURNACE: ItemId = 7;
+pub const ITEM_CHEST: ItemId = 8;
 
 #[derive(Debug, Clone, Default)]
 pub struct Inventory {

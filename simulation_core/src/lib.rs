@@ -18,6 +18,7 @@ pub const CHUNK_TILE_COUNT: usize = (CHUNK_EDGE as usize) * (CHUNK_EDGE as usize
 pub type TileId = u16;
 pub type EntityKind = u16;
 pub type ResourceId = u8;
+pub type PlacedId = u8;
 
 pub const RES_NONE: ResourceId = 0;
 pub const RES_IRON: ResourceId = 1;
@@ -25,10 +26,19 @@ pub const RES_COPPER: ResourceId = 2;
 pub const RES_COAL: ResourceId = 3;
 pub const RES_STONE: ResourceId = 4;
 
+pub const PLACED_NONE: PlacedId = 0;
+pub const PLACED_FURNACE: PlacedId = 1;
+pub const PLACED_CHEST: PlacedId = 2;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ResourceCell {
     pub kind: ResourceId,
     pub amount: u16,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PlacedCell {
+    pub kind: PlacedId,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -45,6 +55,7 @@ pub struct SimChunkData {
     pub layer: ChunkLayer,
     pub tiles: Vec<TileId>,
     pub resources: Vec<ResourceCell>,
+    pub placed: Vec<PlacedCell>,
     pub entities: Vec<Entity>,
     pub saved_tick: u64,
 }
@@ -55,6 +66,7 @@ pub struct SimChunkView<'a> {
     pub layer: ChunkLayer,
     pub tiles: &'a [TileId],
     pub resources: &'a [ResourceCell],
+    pub placed: &'a [PlacedCell],
     pub entities: &'a [Entity],
 }
 
@@ -65,11 +77,13 @@ impl<'a> SimChunkView<'a> {
             layer: data.layer,
             tiles: &data.tiles,
             resources: &data.resources,
+            placed: &data.placed,
             entities: &data.entities,
         }
     }
 }
 pub mod inventory;
 pub use inventory::{
-    Inventory, ItemId, ITEM_COAL, ITEM_COPPER_ORE, ITEM_IRON_ORE, ITEM_NONE, ITEM_STONE,
+    Inventory, ItemId, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE,
+    ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE,
 };
