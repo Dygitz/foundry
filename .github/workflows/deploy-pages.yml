@@ -26,8 +26,21 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Cache Trunk tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trunk
+          key: trunk-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1
+
       - name: Install trunk
-        run: cargo install trunk --locked
+        run: cargo binstall -y trunk
 
       - name: Build
         run: |
