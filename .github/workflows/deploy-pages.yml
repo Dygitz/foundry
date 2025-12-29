@@ -30,22 +30,8 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Cache Trunk tools
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/trunk
-          key: trunk-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
-      - name: Install trunk
-        run: cargo binstall -y trunk
-
-      - name: Add cargo and local bin to PATH
-        run: |
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Trunk
+        uses: taiki-e/install-action@trunk
 
       - name: Build
         run: |
