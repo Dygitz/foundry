@@ -42,8 +42,10 @@ jobs:
       - name: Install trunk
         run: cargo binstall -y trunk
 
-      - name: Add cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Add cargo and local bin to PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Build
         run: |
