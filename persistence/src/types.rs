@@ -86,6 +86,20 @@ pub struct ChunkRecordWrite {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerStateRecord {
+    pub world_id: WorldId,
+    pub blob: Vec<u8>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerStateRecordWrite {
+    pub world_id: WorldId,
+    pub blob: Vec<u8>,
+    pub updated_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SavepointId(String);
 

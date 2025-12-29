@@ -1,6 +1,7 @@
 use persistence::{
     ChunkCoord, ChunkKey, ChunkLayer, ChunkRecord, ChunkRecordWrite, RecoveryReport, SavepointId,
-    StorageError, StorageFuture, WorldId, WorldMeta, WorldStorage,
+    PlayerStateRecord, PlayerStateRecordWrite, StorageError, StorageFuture, WorldId, WorldMeta,
+    WorldStorage,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -22,6 +23,7 @@ mod wasm {
     const STORE_WORLDS: &str = "worlds";
     const STORE_CHUNKS: &str = "chunks";
     const STORE_SAVEPOINTS: &str = "savepoints";
+    const STORE_PLAYER_STATE: &str = "player_state";
     const INDEX_BY_WORLD: &str = "by_world";
     const INDEX_BY_WORLD_COORD: &str = "by_world_coord";
     const STATUS_WRITING: &str = "writing";
@@ -65,6 +67,13 @@ mod wasm {
         created_at_ms: f64,
         status: String,
         chunk_keys: Vec<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PlayerStateRecordRecord {
+        world_id: String,
+        blob: Vec<u8>,
+        updated_at_ms: f64,
     }
 
     #[derive(Debug, Clone)]
@@ -188,7 +197,12 @@ mod wasm {
 
                 let transaction = db
                     .transaction(
-                        &[STORE_WORLDS, STORE_CHUNKS, STORE_SAVEPOINTS],
+                        &[
+                            STORE_WORLDS,
+                            STORE_CHUNKS,
+                            STORE_SAVEPOINTS,
+                            STORE_PLAYER_STATE,
+                        ],
                         TransactionMode::ReadWrite,
                     )
                     .map_err(map_idb_error)?;
@@ -201,6 +215,9 @@ mod wasm {
                     .map_err(map_idb_error)?;
                 let savepoints = transaction
                     .object_store(STORE_SAVEPOINTS)
+                    .map_err(map_idb_error)?;
+                let player_state = transaction
+                    .object_store(STORE_PLAYER_STATE)
                     .map_err(map_idb_error)?;
 
                 worlds
@@ -224,6 +241,80 @@ mod wasm {
                         .await
                         .map_err(map_idb_error)?;
                 }
+
+                player_state
+                    .delete(JsValue::from_str(world_id.as_str()))
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
+
+                transaction
+                    .commit()
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
+                Ok(())
+            })
+        }
+
+        fn load_player_state(
+            &self,
+            world_id: &WorldId,
+        ) -> StorageFuture<'_, Option<PlayerStateRecord>> {
+            let world_id = world_id.clone();
+            Box::pin(async move {
+                let db = self.get_db().await?;
+                let transaction = db
+                    .transaction(&[STORE_PLAYER_STATE], TransactionMode::ReadOnly)
+                    .map_err(map_idb_error)?;
+                let store = transaction
+                    .object_store(STORE_PLAYER_STATE)
+                    .map_err(map_idb_error)?;
+
+                let value = store
+                    .get(JsValue::from_str(world_id.as_str()))
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
+
+                transaction.await.map_err(map_idb_error)?;
+
+                let Some(value) = value else {
+                    return Ok(None);
+                };
+                let record: PlayerStateRecordRecord =
+                    from_value(value).map_err(map_serde_decode_error)?;
+
+                Ok(Some(PlayerStateRecord {
+                    world_id: WorldId::from(record.world_id),
+                    blob: record.blob,
+                    updated_at_ms: f64_to_u64(record.updated_at_ms, "updated_at_ms")?,
+                }))
+            })
+        }
+
+        fn save_player_state(&self, record: PlayerStateRecordWrite) -> StorageFuture<'_, ()> {
+            Box::pin(async move {
+                let db = self.get_db().await?;
+                let transaction = db
+                    .transaction(&[STORE_PLAYER_STATE], TransactionMode::ReadWrite)
+                    .map_err(map_idb_error)?;
+                let store = transaction
+                    .object_store(STORE_PLAYER_STATE)
+                    .map_err(map_idb_error)?;
+
+                let record = PlayerStateRecordRecord {
+                    world_id: record.world_id.as_str().to_string(),
+                    blob: record.blob,
+                    updated_at_ms: u64_to_f64(record.updated_at_ms),
+                };
+                let value = to_value(&record).map_err(map_serde_encode_error)?;
+
+                store
+                    .put(&value, None)
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
 
                 transaction
                     .commit()
@@ -537,6 +628,14 @@ mod wasm {
         )?;
         ensure_index(&savepoints_store, INDEX_BY_WORLD, KeyPath::new_single(FIELD_WORLD_ID))?;
 
+        let _player_state_store = get_or_create_store(
+            database,
+            request,
+            &store_names,
+            STORE_PLAYER_STATE,
+            FIELD_WORLD_ID,
+        )?;
+
         Ok(())
     }
 
@@ -810,6 +909,22 @@ impl WorldStorage for IndexedDbStorage {
     }
 
     fn delete_world(&self, _world_id: &WorldId) -> StorageFuture<'_, ()> {
+        Box::pin(async move {
+            Err(StorageError::InitFailed(
+                "IndexedDB is only available for wasm32 targets".to_string(),
+            ))
+        })
+    }
+
+    fn load_player_state(&self, _world_id: &WorldId) -> StorageFuture<'_, Option<PlayerStateRecord>> {
+        Box::pin(async move {
+            Err(StorageError::InitFailed(
+                "IndexedDB is only available for wasm32 targets".to_string(),
+            ))
+        })
+    }
+
+    fn save_player_state(&self, _record: PlayerStateRecordWrite) -> StorageFuture<'_, ()> {
         Box::pin(async move {
             Err(StorageError::InitFailed(
                 "IndexedDB is only available for wasm32 targets".to_string(),

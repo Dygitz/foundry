@@ -12,10 +12,13 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::tasks::futures_lite::future;
 use persistence::{
-    ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite, RecoveryReport,
-    StorageError, WorldId, WorldStorage,
+    ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite,
+    PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId, WorldStorage,
 };
-use simulation_core::{SimChunkData, SimChunkView, TileId, CHUNK_EDGE, CHUNK_TILE_COUNT};
+use simulation_core::{
+    Inventory, SimChunkData, SimChunkView, TileId, ITEM_COAL, ITEM_COPPER_ORE, ITEM_IRON_ORE,
+    ITEM_NONE, ITEM_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
+};
 use web_storage_indexeddb::IndexedDbStorage;
 
 pub fn run() {
@@ -28,6 +31,9 @@ pub fn run() {
         .insert_resource(WorldRuntime::default())
         .insert_resource(ChunkCacheConfig::default())
         .insert_resource(PlayerConfig::default())
+        .insert_resource(PlayerState::default())
+        .insert_resource(PlayerStateSaveState::default())
+        .insert_resource(PlayerStateLoadState::default())
         .insert_resource(EvictionStats::default())
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
@@ -50,6 +56,7 @@ pub fn run() {
             (
                 storage_init_pump_system,
                 storage_recovery_pump_system,
+                player_state_load_pump_system,
                 autosave_flush_system,
                 storage_status_text_system,
             ),
@@ -60,6 +67,9 @@ pub fn run() {
                 world_runtime_frame_counter_system,
                 player_movement_system,
                 player_visual_system,
+                inventory_debug_input_system,
+                inventory_text_system,
+                player_state_save_system,
                 camera_follow_system,
                 camera_zoom_system,
                 active_area_chunk_request_system,
@@ -204,7 +214,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             db_name: "game_worlds".to_string(),
-            db_version: 1,
+            db_version: 2,
             game_schema_version: 1,
         }
     }
@@ -348,6 +358,9 @@ struct ChunkRenderTag;
 struct WorldStatsText;
 
 #[derive(Component)]
+struct InventoryText;
+
+#[derive(Component)]
 struct Player;
 
 #[derive(Component, Copy, Clone)]
@@ -359,6 +372,34 @@ enum Facing {
     Down,
     Left,
     Right,
+}
+
+#[derive(Resource, Default)]
+struct PlayerState {
+    inventory: Inventory,
+}
+
+#[derive(Resource)]
+struct PlayerStateSaveState {
+    timer: Timer,
+    in_flight: Option<Task<Result<(), StorageError>>>,
+    dirty: bool,
+}
+
+impl Default for PlayerStateSaveState {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+            in_flight: None,
+            dirty: false,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct PlayerStateLoadState {
+    task: Option<Task<Result<Option<persistence::PlayerStateRecord>, StorageError>>>,
+    loaded: bool,
 }
 
 #[derive(Resource, Default)]
@@ -436,6 +477,21 @@ fn setup(
         },
         WorldStatsText,
     ));
+    commands.spawn((
+        Text::new("Inventory: Iron 0 | Copper 0 | Coal 0 | Stone 0"),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(52.0),
+            ..default()
+        },
+        InventoryText,
+    ));
 }
 
 fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
@@ -495,6 +551,44 @@ fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Pla
             Facing::Right => sprite.flip_x = false,
             Facing::Up | Facing::Down => {}
         }
+    }
+}
+
+fn inventory_debug_input_system(keys: Res<ButtonInput<KeyCode>>, mut player: ResMut<PlayerState>) {
+    if keys.just_pressed(KeyCode::Digit1) {
+        player.inventory.add(ITEM_IRON_ORE, 10);
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        player.inventory.add(ITEM_COPPER_ORE, 10);
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        player.inventory.add(ITEM_COAL, 10);
+    }
+    if keys.just_pressed(KeyCode::Digit4) {
+        player.inventory.add(ITEM_STONE, 10);
+    }
+    if keys.just_pressed(KeyCode::KeyQ) {
+        let _ = player.inventory.try_remove(ITEM_IRON_ORE, 1);
+    }
+}
+
+fn inventory_text_system(
+    player: Res<PlayerState>,
+    mut query: Query<&mut Text, With<InventoryText>>,
+) {
+    if !player.is_changed() {
+        return;
+    }
+    let inv = &player.inventory;
+    let label = format!(
+        "Inventory: Iron {} | Copper {} | Coal {} | Stone {}",
+        inv.count(ITEM_IRON_ORE),
+        inv.count(ITEM_COPPER_ORE),
+        inv.count(ITEM_COAL),
+        inv.count(ITEM_STONE),
+    );
+    for mut text in &mut query {
+        *text = Text::new(label.clone());
     }
 }
 
@@ -620,6 +714,7 @@ fn storage_init_pump_system(
     services: NonSend<StorageServices>,
     session: Res<WorldSession>,
     mut recovery: ResMut<RecoveryState>,
+    mut load_state: ResMut<PlayerStateLoadState>,
 ) {
     if let Some(task) = init_task.task.as_mut() {
         if let Some(result) = future::block_on(future::poll_once(task)) {
@@ -642,6 +737,14 @@ fn storage_init_pump_system(
         });
         recovery.task = Some(task);
     }
+
+    if init_task.ready && recovery.completed && !load_state.loaded && load_state.task.is_none() {
+        let storage = services.storage.clone();
+        let world_id = session.world_id.clone();
+        load_state.task = Some(AsyncComputeTaskPool::get().spawn_local(async move {
+            storage.load_player_state(&world_id).await
+        }));
+    }
 }
 
 fn storage_recovery_pump_system(
@@ -662,6 +765,82 @@ fn storage_recovery_pump_system(
         }
         recovery.task = None;
     }
+}
+
+fn player_state_load_pump_system(
+    mut load: ResMut<PlayerStateLoadState>,
+    mut player: ResMut<PlayerState>,
+    mut status: ResMut<StorageStatus>,
+) {
+    let Some(task) = load.task.as_mut() else {
+        return;
+    };
+
+    if let Some(result) = future::block_on(future::poll_once(task)) {
+        match result {
+            Ok(Some(record)) => match decode_player_state_v1(&record.blob) {
+                Ok(inventory) => {
+                    player.inventory = inventory;
+                    status.mark_ok();
+                }
+                Err(error) => status.record_error(&StorageError::DecodeFailed(error)),
+            },
+            Ok(None) => status.mark_ok(),
+            Err(error) => status.record_error(&error),
+        }
+        load.task = None;
+        load.loaded = true;
+    }
+}
+
+fn player_state_save_system(
+    time: Res<Time>,
+    mut save: ResMut<PlayerStateSaveState>,
+    player: Res<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut status: ResMut<StorageStatus>,
+) {
+    if player.is_changed() {
+        save.dirty = true;
+    }
+
+    save.timer.tick(time.delta());
+
+    if let Some(task) = save.in_flight.as_mut() {
+        if let Some(result) = future::block_on(future::poll_once(task)) {
+            match result {
+                Ok(()) => status.mark_ok(),
+                Err(error) => status.record_error(&error),
+            }
+            save.in_flight = None;
+        }
+    }
+
+    if save.in_flight.is_some() {
+        return;
+    }
+    if status.state == StorageState::Paused {
+        return;
+    }
+    if !save.timer.just_finished() {
+        return;
+    }
+    if !save.dirty {
+        return;
+    }
+
+    let blob = encode_player_state_v1(&player.inventory);
+    let record = PlayerStateRecordWrite {
+        world_id: session.world_id.clone(),
+        blob,
+        updated_at_ms: time.elapsed().as_millis() as u64,
+    };
+    let storage = services.storage.clone();
+    save.dirty = false;
+    save.in_flight = Some(AsyncComputeTaskPool::get().spawn_local(async move {
+        storage.save_player_state(record).await
+    }));
 }
 
 fn autosave_flush_system(
@@ -1061,6 +1240,63 @@ fn required_radius_chunks(
     let rx = (half_w / chunk_size).ceil() as i32 + margin;
     let ry = (half_h / chunk_size).ceil() as i32 + margin;
     (rx.max(0), ry.max(0))
+}
+
+const PS_MAGIC: [u8; 4] = *b"PLR1";
+const PS_VERSION: u16 = 1;
+
+fn encode_player_state_v1(inv: &Inventory) -> Vec<u8> {
+    let entries: Vec<(simulation_core::ItemId, u32)> = inv.entries().collect();
+    let count_u16: u16 = entries.len().min(u16::MAX as usize) as u16;
+
+    let mut out = Vec::with_capacity(4 + 2 + 2 + (count_u16 as usize) * 6);
+    out.extend_from_slice(&PS_MAGIC);
+    out.extend_from_slice(&PS_VERSION.to_le_bytes());
+    out.extend_from_slice(&count_u16.to_le_bytes());
+    for (item, qty) in entries.into_iter().take(count_u16 as usize) {
+        out.extend_from_slice(&item.to_le_bytes());
+        out.extend_from_slice(&qty.to_le_bytes());
+    }
+    out
+}
+
+fn decode_player_state_v1(bytes: &[u8]) -> Result<Inventory, String> {
+    if bytes.len() < 8 {
+        return Err("player_state blob too short".to_string());
+    }
+    if bytes[0..4] != PS_MAGIC {
+        return Err("player_state magic mismatch".to_string());
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if version != PS_VERSION {
+        return Err(format!("player_state version {version} unsupported"));
+    }
+
+    let count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+    let mut offset = 8usize;
+    let mut inv = Inventory::default();
+
+    for _ in 0..count {
+        if offset + 6 > bytes.len() {
+            return Err("player_state truncated".to_string());
+        }
+        let item = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        let qty = u32::from_le_bytes([
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+        ]);
+        offset += 6;
+        if item != ITEM_NONE && qty > 0 {
+            inv.add(item, qty);
+        }
+    }
+
+    if offset != bytes.len() {
+        return Err("player_state trailing bytes".to_string());
+    }
+    Ok(inv)
 }
 
 fn world_to_chunk_coord(world_pos: Vec2, chunk_size: f32) -> ChunkCoord {

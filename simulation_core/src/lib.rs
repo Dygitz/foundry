@@ -53,3 +53,7 @@ impl<'a> SimChunkView<'a> {
         }
     }
 }
+pub mod inventory;
+pub use inventory::{
+    Inventory, ItemId, ITEM_COAL, ITEM_COPPER_ORE, ITEM_IRON_ORE, ITEM_NONE, ITEM_STONE,
+};

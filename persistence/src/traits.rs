@@ -3,8 +3,8 @@ use std::pin::Pin;
 
 use crate::errors::Result;
 use crate::types::{
-    ChunkCoord, ChunkKey, ChunkLayer, ChunkRecord, ChunkRecordWrite, RecoveryReport, SavepointId,
-    WorldId, WorldMeta,
+    ChunkCoord, ChunkKey, ChunkLayer, ChunkRecord, ChunkRecordWrite, PlayerStateRecord,
+    PlayerStateRecordWrite, RecoveryReport, SavepointId, WorldId, WorldMeta,
 };
 use simulation_core::{SimChunkData, SimChunkView};
 
@@ -17,6 +17,11 @@ pub trait WorldStorage {
     fn list_worlds(&self) -> StorageFuture<'_, Vec<WorldMeta>>;
     fn load_world_meta(&self, world_id: &WorldId) -> StorageFuture<'_, Option<WorldMeta>>;
     fn delete_world(&self, world_id: &WorldId) -> StorageFuture<'_, ()>;
+    fn load_player_state(
+        &self,
+        world_id: &WorldId,
+    ) -> StorageFuture<'_, Option<PlayerStateRecord>>;
+    fn save_player_state(&self, record: PlayerStateRecordWrite) -> StorageFuture<'_, ()>;
 
     fn get_chunk(
         &self,
