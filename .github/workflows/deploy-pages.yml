@@ -37,7 +37,7 @@ jobs:
           key: trunk-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@v1
+        uses: cargo-bins/cargo-binstall@main
 
       - name: Install trunk
         run: cargo binstall -y trunk
