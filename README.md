@@ -16,15 +16,20 @@ This repo is structured to keep simulation/game state independent from rendering
 
 - Chunked world streaming + caching + eviction
 - Deterministic terrain generation
-- Player movement + camera follow
-- Persistent world data (IndexedDB)
-- Persistent inventory (IndexedDB)
 - Ores/resources and mining (collected into inventory)
+- Player movement + camera follow + mouse-wheel zoom
+- Crafting menu + placeable structures (furnace, chest)
+- Furnace smelting (ore -> plates) + chest storage UI
+- Persistent world data + inventory (IndexedDB, autosave + recovery)
 
 ## Controls
 
 - Move: WASD / Arrow keys
-- Mine: Left click (on resource tiles)
+- Mine / interact: Left click (resource tiles; open chest/furnace UI)
+- Craft menu: E to open/close; 1-2 to craft
+- Place structure: F furnace, C chest, Esc clear; left click to place
+- Close UI panels: Esc or right click
+- Zoom: Mouse wheel
 
 ## Reset your local world
 
