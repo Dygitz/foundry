@@ -401,6 +401,8 @@ impl Default for ChunkLoadState {
 
 struct MapChunk {
     rgba: Vec<u8>,
+    resource_kinds: Vec<ResourceId>,
+    resource_amounts: Vec<u16>,
     image: Handle<Image>,
     updated_at_ms: u64,
 }
@@ -494,6 +496,18 @@ enum MapSurfaceKind {
 #[derive(Component, Copy, Clone)]
 struct MapContent {
     kind: MapSurfaceKind,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct MapResourceCell {
+    kind: ResourceId,
+    amount: u16,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct ResourceNodeSummary {
+    kind: ResourceId,
+    total: u32,
 }
 
 #[derive(Component)]
@@ -597,6 +611,9 @@ const MINIMAP_PX_PER_TILE: f32 = 1.0;
 const FULL_MAP_DEFAULT_PX_PER_TILE: f32 = 2.0;
 const FULL_MAP_MIN_PX_PER_TILE: f32 = 0.25;
 const FULL_MAP_MAX_PX_PER_TILE: f32 = 8.0;
+const MAP_TOOLTIP_WIDTH: f32 = 168.0;
+const MAP_TOOLTIP_HEIGHT: f32 = 28.0;
+const MAP_TOOLTIP_OFFSET: f32 = 12.0;
 
 #[derive(Resource)]
 struct PlayerStateSaveState {
@@ -2061,11 +2078,15 @@ fn map_load_pump_system(
                     )));
                     continue;
                 }
+                let (resource_kinds, resource_amounts) =
+                    normalize_map_resource_metadata(record.resource_kinds, record.resource_amounts);
                 let image = images.add(build_map_chunk_image(&record.rgba));
                 map.explored.insert(
                     record.key,
                     MapChunk {
                         rgba: record.rgba,
+                        resource_kinds,
+                        resource_amounts,
                         image,
                         updated_at_ms: record.updated_at_ms,
                     },
@@ -2148,6 +2169,7 @@ fn map_ui_render_system(
     ui_state: Res<UiState>,
     windows: Query<&Window>,
     config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
     player_query: Query<&Transform, With<Player>>,
     content_query: Query<(Entity, &MapContent)>,
     children_query: Query<&Children, With<MapContent>>,
@@ -2156,10 +2178,11 @@ fn map_ui_render_system(
         return;
     };
     let player_tile = world_pos_to_tile_pos(player_transform.translation.truncate(), &config);
-    let window_size = windows
-        .single()
+    let window = windows.single().ok();
+    let window_size = window
         .map(|window| Vec2::new(window.width(), window.height()))
         .unwrap_or(Vec2::new(MINIMAP_SIZE, MINIMAP_SIZE));
+    let cursor_pos = window.and_then(Window::cursor_position);
 
     for (entity, content) in &content_query {
         if content.kind == MapSurfaceKind::Minimap && ui_state.mode == UiMode::Map {
@@ -2171,20 +2194,39 @@ fn map_ui_render_system(
             continue;
         }
 
-        let (viewport, center_tile, px_per_tile, marker_size) = match content.kind {
+        let (viewport, center_tile, px_per_tile, marker_size, surface_origin) = match content.kind {
             MapSurfaceKind::Minimap => (
                 Vec2::splat(MINIMAP_SIZE),
                 player_tile,
                 MINIMAP_PX_PER_TILE,
                 5.0,
+                Vec2::new(
+                    window_size.x - MINIMAP_MARGIN - MINIMAP_SIZE,
+                    window_size.y - MINIMAP_MARGIN - MINIMAP_SIZE,
+                ),
             ),
             MapSurfaceKind::Full => (
                 window_size,
                 map.full_view.center_tile,
                 map.full_view.px_per_tile,
                 8.0,
+                Vec2::ZERO,
             ),
         };
+        let hovered_resource = cursor_pos.and_then(|cursor| {
+            let local_cursor = cursor - surface_origin;
+            if local_cursor.x < 0.0
+                || local_cursor.y < 0.0
+                || local_cursor.x >= viewport.x
+                || local_cursor.y >= viewport.y
+            {
+                return None;
+            }
+            let (tile_x, tile_y) =
+                map_local_cursor_to_tile(local_cursor, center_tile, px_per_tile, viewport);
+            map_resource_node_summary(&map, &session, config.layer, tile_x, tile_y)
+                .map(|summary| (local_cursor, summary))
+        });
 
         clear_map_content(&mut commands, entity, &children_query);
         commands.entity(entity).with_children(|parent| {
@@ -2197,6 +2239,9 @@ fn map_ui_render_system(
                 viewport,
                 marker_size,
             );
+            if let Some((local_cursor, summary)) = hovered_resource {
+                spawn_map_resource_tooltip(parent, local_cursor, viewport, summary);
+            }
         });
     }
 }
@@ -3356,15 +3401,27 @@ fn upsert_map_snapshot(
     updated_at_ms: u64,
 ) {
     let rgba = map_snapshot_pixels(data, world_seed);
+    let (resource_kinds, resource_amounts) = map_resource_metadata(data);
     let changed = match map.explored.get_mut(key) {
-        Some(chunk) if chunk.rgba == rgba => false,
+        Some(chunk)
+            if chunk.rgba == rgba
+                && chunk.resource_kinds == resource_kinds
+                && chunk.resource_amounts == resource_amounts =>
+        {
+            false
+        }
         Some(chunk) => {
+            let rgba_changed = chunk.rgba != rgba;
             chunk.rgba = rgba.clone();
+            chunk.resource_kinds = resource_kinds.clone();
+            chunk.resource_amounts = resource_amounts.clone();
             chunk.updated_at_ms = updated_at_ms;
-            if let Some(image) = images.get_mut(&chunk.image) {
-                *image = build_map_chunk_image(&rgba);
-            } else {
-                chunk.image = images.add(build_map_chunk_image(&rgba));
+            if rgba_changed {
+                if let Some(image) = images.get_mut(&chunk.image) {
+                    *image = build_map_chunk_image(&rgba);
+                } else {
+                    chunk.image = images.add(build_map_chunk_image(&rgba));
+                }
             }
             true
         }
@@ -3374,6 +3431,8 @@ fn upsert_map_snapshot(
                 key.clone(),
                 MapChunk {
                     rgba: rgba.clone(),
+                    resource_kinds: resource_kinds.clone(),
+                    resource_amounts: resource_amounts.clone(),
                     image,
                     updated_at_ms,
                 },
@@ -3383,22 +3442,40 @@ fn upsert_map_snapshot(
     };
 
     if changed {
-        queue_map_snapshot_save(map, key.clone(), rgba, updated_at_ms);
+        queue_map_snapshot_save(
+            map,
+            key.clone(),
+            rgba,
+            resource_kinds,
+            resource_amounts,
+            updated_at_ms,
+        );
     }
 }
 
-fn queue_map_snapshot_save(map: &mut MapState, key: ChunkKey, rgba: Vec<u8>, updated_at_ms: u64) {
+fn queue_map_snapshot_save(
+    map: &mut MapState,
+    key: ChunkKey,
+    rgba: Vec<u8>,
+    resource_kinds: Vec<ResourceId>,
+    resource_amounts: Vec<u16>,
+    updated_at_ms: u64,
+) {
     if let Some(existing) = map
         .pending_saves
         .iter_mut()
         .find(|record| record.key == key)
     {
         existing.rgba = rgba;
+        existing.resource_kinds = resource_kinds;
+        existing.resource_amounts = resource_amounts;
         existing.updated_at_ms = updated_at_ms;
     } else {
         map.pending_saves.push_back(MapChunkRecordWrite {
             key: key.clone(),
             rgba,
+            resource_kinds,
+            resource_amounts,
             updated_at_ms,
         });
     }
@@ -3476,6 +3553,161 @@ fn spawn_map_player_marker(
         BackgroundColor(Color::srgb(1.0, 0.9, 0.25)),
         BorderColor(Color::srgb(0.05, 0.05, 0.05)),
     ));
+}
+
+fn spawn_map_resource_tooltip(
+    parent: &mut ChildSpawnerCommands,
+    cursor: Vec2,
+    viewport: Vec2,
+    summary: ResourceNodeSummary,
+) {
+    let max_left = (viewport.x - MAP_TOOLTIP_WIDTH).max(0.0);
+    let max_top = (viewport.y - MAP_TOOLTIP_HEIGHT).max(0.0);
+    let mut left = cursor.x + MAP_TOOLTIP_OFFSET;
+    if left + MAP_TOOLTIP_WIDTH > viewport.x {
+        left = cursor.x - MAP_TOOLTIP_WIDTH - MAP_TOOLTIP_OFFSET;
+    }
+    let mut top = cursor.y + MAP_TOOLTIP_OFFSET;
+    if top + MAP_TOOLTIP_HEIGHT > viewport.y {
+        top = cursor.y - MAP_TOOLTIP_HEIGHT - MAP_TOOLTIP_OFFSET;
+    }
+    let label = format!(
+        "{}: {} left",
+        resource_display_name(summary.kind),
+        summary.total
+    );
+
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(MAP_TOOLTIP_WIDTH),
+                height: Val::Px(MAP_TOOLTIP_HEIGHT),
+                position_type: PositionType::Absolute,
+                left: Val::Px(left.clamp(0.0, max_left)),
+                top: Val::Px(top.clamp(0.0, max_top)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.04, 0.04, 0.05, 0.88)),
+            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.35)),
+        ))
+        .with_children(|tooltip| {
+            tooltip.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.96, 0.94, 0.84)),
+            ));
+        });
+}
+
+fn map_local_cursor_to_tile(
+    cursor: Vec2,
+    center_tile: Vec2,
+    px_per_tile: f32,
+    viewport: Vec2,
+) -> (i32, i32) {
+    let tile_x = center_tile.x + (cursor.x - viewport.x * 0.5) / px_per_tile;
+    let tile_y = center_tile.y + (viewport.y * 0.5 - cursor.y) / px_per_tile;
+    (tile_x.floor() as i32, tile_y.floor() as i32)
+}
+
+fn map_resource_node_summary(
+    map: &MapState,
+    session: &WorldSession,
+    layer: ChunkLayer,
+    tile_x: i32,
+    tile_y: i32,
+) -> Option<ResourceNodeSummary> {
+    let origin = map_resource_at(map, session, layer, tile_x, tile_y)?;
+    let mut total = 0u32;
+    let mut visited = HashSet::new();
+    let mut pending = VecDeque::from([(tile_x, tile_y)]);
+
+    while let Some((x, y)) = pending.pop_front() {
+        if !visited.insert((x, y)) {
+            continue;
+        }
+        let Some(cell) = map_resource_at(map, session, layer, x, y) else {
+            continue;
+        };
+        if cell.kind != origin.kind {
+            continue;
+        }
+
+        total += cell.amount as u32;
+        pending.push_back((x + 1, y));
+        pending.push_back((x - 1, y));
+        pending.push_back((x, y + 1));
+        pending.push_back((x, y - 1));
+    }
+
+    (total > 0).then_some(ResourceNodeSummary {
+        kind: origin.kind,
+        total,
+    })
+}
+
+fn map_resource_at(
+    map: &MapState,
+    session: &WorldSession,
+    layer: ChunkLayer,
+    tile_x: i32,
+    tile_y: i32,
+) -> Option<MapResourceCell> {
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, layer);
+    let chunk = map.explored.get(&key)?;
+    let idx = local_y as usize * CHUNK_EDGE as usize + local_x as usize;
+    let kind = chunk.resource_kinds.get(idx).copied().unwrap_or(RES_NONE);
+    let amount = chunk.resource_amounts.get(idx).copied().unwrap_or(0);
+
+    if kind == RES_NONE || amount == 0 {
+        return None;
+    }
+    Some(MapResourceCell { kind, amount })
+}
+
+fn map_resource_metadata(data: &SimChunkData) -> (Vec<ResourceId>, Vec<u16>) {
+    let mut resource_kinds = vec![RES_NONE; CHUNK_TILE_COUNT];
+    let mut resource_amounts = vec![0; CHUNK_TILE_COUNT];
+    for (idx, resource) in data
+        .resources
+        .iter()
+        .copied()
+        .take(CHUNK_TILE_COUNT)
+        .enumerate()
+    {
+        if resource.kind != RES_NONE && resource.amount > 0 {
+            resource_kinds[idx] = resource.kind;
+            resource_amounts[idx] = resource.amount;
+        }
+    }
+    (resource_kinds, resource_amounts)
+}
+
+fn normalize_map_resource_metadata(
+    resource_kinds: Vec<ResourceId>,
+    resource_amounts: Vec<u16>,
+) -> (Vec<ResourceId>, Vec<u16>) {
+    if resource_kinds.len() == CHUNK_TILE_COUNT && resource_amounts.len() == CHUNK_TILE_COUNT {
+        return (resource_kinds, resource_amounts);
+    }
+    (vec![RES_NONE; CHUNK_TILE_COUNT], vec![0; CHUNK_TILE_COUNT])
+}
+
+fn resource_display_name(kind: ResourceId) -> &'static str {
+    match kind {
+        RES_IRON => "Iron Ore",
+        RES_COPPER => "Copper Ore",
+        RES_COAL => "Coal",
+        RES_STONE => "Stone",
+        _ => "Resource",
+    }
 }
 
 fn build_map_chunk_image(rgba: &[u8]) -> Image {
@@ -4117,6 +4349,16 @@ mod tests {
         ]
     }
 
+    fn blank_map_chunk() -> MapChunk {
+        MapChunk {
+            rgba: vec![0; MAP_CHUNK_BYTES],
+            resource_kinds: vec![RES_NONE; CHUNK_TILE_COUNT],
+            resource_amounts: vec![0; CHUNK_TILE_COUNT],
+            image: Handle::<Image>::default(),
+            updated_at_ms: 0,
+        }
+    }
+
     #[test]
     fn map_snapshot_has_one_rgba_pixel_per_tile() {
         let data = test_chunk();
@@ -4137,6 +4379,28 @@ mod tests {
         let with_resource = map_snapshot_pixels(&data, 7);
 
         assert_ne!(map_pixel(&base, 5, 6), map_pixel(&with_resource, 5, 6));
+    }
+
+    #[test]
+    fn map_resource_metadata_tracks_known_resource_amounts() {
+        let mut data = test_chunk();
+        data.resources[local_idx(3, 4)] = ResourceCell {
+            kind: RES_COAL,
+            amount: 9,
+        };
+        data.resources[local_idx(5, 6)] = ResourceCell {
+            kind: RES_IRON,
+            amount: 0,
+        };
+
+        let (resource_kinds, resource_amounts) = map_resource_metadata(&data);
+
+        assert_eq!(resource_kinds.len(), CHUNK_TILE_COUNT);
+        assert_eq!(resource_amounts.len(), CHUNK_TILE_COUNT);
+        assert_eq!(resource_kinds[local_idx(3, 4)], RES_COAL);
+        assert_eq!(resource_amounts[local_idx(3, 4)], 9);
+        assert_eq!(resource_kinds[local_idx(5, 6)], RES_NONE);
+        assert_eq!(resource_amounts[local_idx(5, 6)], 0);
     }
 
     #[test]
@@ -4163,5 +4427,35 @@ mod tests {
             map_pixel(&map_pixels, 11, 13),
             chunk_pixel(&chunk_pixels, 11, 13)
         );
+    }
+
+    #[test]
+    fn map_resource_node_summary_sums_connected_explored_tiles_across_chunks() {
+        let session = WorldSession::default();
+        let layer = 0;
+        let mut map = MapState::default();
+        let mut left_chunk = blank_map_chunk();
+        let mut right_chunk = blank_map_chunk();
+
+        left_chunk.resource_kinds[local_idx(31, 0)] = RES_IRON;
+        left_chunk.resource_amounts[local_idx(31, 0)] = 5;
+        right_chunk.resource_kinds[local_idx(0, 0)] = RES_IRON;
+        right_chunk.resource_amounts[local_idx(0, 0)] = 7;
+        right_chunk.resource_kinds[local_idx(2, 0)] = RES_IRON;
+        right_chunk.resource_amounts[local_idx(2, 0)] = 100;
+
+        map.explored.insert(
+            ChunkKey::new(session.world_id.clone(), ChunkCoord::new(0, 0), layer),
+            left_chunk,
+        );
+        map.explored.insert(
+            ChunkKey::new(session.world_id.clone(), ChunkCoord::new(1, 0), layer),
+            right_chunk,
+        );
+
+        let summary = map_resource_node_summary(&map, &session, layer, 31, 0).unwrap();
+
+        assert_eq!(summary.kind, RES_IRON);
+        assert_eq!(summary.total, 12);
     }
 }

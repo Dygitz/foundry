@@ -90,6 +90,8 @@ pub struct ChunkRecordWrite {
 pub struct MapChunkRecord {
     pub key: ChunkKey,
     pub rgba: Vec<u8>,
+    pub resource_kinds: Vec<u8>,
+    pub resource_amounts: Vec<u16>,
     pub updated_at_ms: u64,
 }
 
@@ -97,6 +99,8 @@ pub struct MapChunkRecord {
 pub struct MapChunkRecordWrite {
     pub key: ChunkKey,
     pub rgba: Vec<u8>,
+    pub resource_kinds: Vec<u8>,
+    pub resource_amounts: Vec<u16>,
     pub updated_at_ms: u64,
 }
 

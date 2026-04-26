@@ -68,6 +68,10 @@ mod wasm {
         cy: i32,
         layer: u8,
         rgba: Vec<u8>,
+        #[serde(default)]
+        resource_kinds: Vec<u8>,
+        #[serde(default)]
+        resource_amounts: Vec<u16>,
         updated_at_ms: f64,
     }
 
@@ -876,6 +880,8 @@ mod wasm {
             cy: record.key.coord.cy,
             layer: record.key.layer,
             rgba: record.rgba.clone(),
+            resource_kinds: record.resource_kinds.clone(),
+            resource_amounts: record.resource_amounts.clone(),
             updated_at_ms: u64_to_f64(record.updated_at_ms),
         };
         to_value(&record).map_err(map_serde_encode_error)
@@ -895,6 +901,8 @@ mod wasm {
         Ok(MapChunkRecord {
             key,
             rgba: record.rgba,
+            resource_kinds: record.resource_kinds,
+            resource_amounts: record.resource_amounts,
             updated_at_ms: f64_to_u64(record.updated_at_ms, "updated_at_ms")?,
         })
     }
