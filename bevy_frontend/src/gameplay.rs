@@ -5,6 +5,23 @@ use crate::{
     ui::*, world::*,
 };
 
+pub(crate) struct FoundryGameplayPlugin;
+
+impl Plugin for FoundryGameplayPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (placement_select_system, hotbar_input_system).in_set(UpdateSet::Input),
+        )
+        .add_systems(Update, (mining_input_system,).in_set(UpdateSet::Input))
+        .add_systems(
+            Update,
+            (chest_button_system, furnace_button_system).in_set(UpdateSet::Ui),
+        )
+        .add_systems(Update, (furnace_smelting_system,).in_set(UpdateSet::World));
+    }
+}
+
 pub(crate) fn placement_select_system(
     keys: Res<ButtonInput<KeyCode>>,
     ui_state: Res<UiState>,

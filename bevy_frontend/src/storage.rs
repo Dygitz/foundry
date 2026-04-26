@@ -5,6 +5,33 @@ use crate::{
     ui::*, world::*,
 };
 
+pub(crate) struct FoundryStoragePlugin;
+
+impl Plugin for FoundryStoragePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, init_storage)
+            .add_systems(
+                Update,
+                (
+                    storage_init_pump_system,
+                    storage_recovery_pump_system,
+                    player_state_load_pump_system,
+                    autosave_flush_system,
+                ),
+            )
+            .add_systems(Update, (player_state_save_system,).in_set(UpdateSet::Ui))
+            .add_systems(
+                Update,
+                (
+                    chunk_load_pump_system,
+                    chunk_loaded_system,
+                    chunk_eviction_system,
+                )
+                    .in_set(UpdateSet::World),
+            );
+    }
+}
+
 pub(crate) fn init_storage(world: &mut World) {
     let (db_name, db_version, game_schema_version) = {
         let config = world.resource::<StorageConfig>();

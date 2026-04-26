@@ -5,6 +5,27 @@ use crate::{
     storage::*, ui::*, world::*,
 };
 
+pub(crate) struct FoundryMapPlugin;
+
+impl Plugin for FoundryMapPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (map_toggle_system, full_map_input_system).in_set(UpdateSet::Input),
+        )
+        .add_systems(
+            Update,
+            (
+                minimap_visibility_system,
+                map_load_pump_system,
+                map_save_system,
+                map_ui_render_system,
+            )
+                .in_set(UpdateSet::Ui),
+        );
+    }
+}
+
 pub(crate) fn map_toggle_system(
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<WorldRenderConfig>,

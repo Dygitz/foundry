@@ -5,6 +5,23 @@ use crate::{
     ui::*, world::*,
 };
 
+pub(crate) struct FoundryPlayerPlugin;
+
+impl Plugin for FoundryPlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (
+                world_runtime_frame_counter_system,
+                player_movement_system,
+                player_visual_system,
+                inventory_debug_input_system,
+            )
+                .in_set(UpdateSet::Input),
+        );
+    }
+}
+
 pub(crate) fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
     runtime.advance_frame();
 }

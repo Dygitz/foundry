@@ -5,6 +5,17 @@ use crate::{
     storage::*, ui::*,
 };
 
+pub(crate) struct FoundryWorldPlugin;
+
+impl Plugin for FoundryWorldPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (active_area_chunk_request_system,).in_set(UpdateSet::World),
+        );
+    }
+}
+
 pub(crate) fn active_area_chunk_request_system(
     windows: Query<&Window>,
     camera_query: Query<(&Transform, &Projection, &Camera), With<Camera2d>>,

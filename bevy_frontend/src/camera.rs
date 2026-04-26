@@ -5,6 +5,17 @@ use crate::{
     ui::*, world::*,
 };
 
+pub(crate) struct FoundryCameraPlugin;
+
+impl Plugin for FoundryCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (camera_follow_system, camera_zoom_system).in_set(UpdateSet::World),
+        );
+    }
+}
+
 pub(crate) fn camera_follow_system(
     time: Res<Time>,
     config: Res<PlayerConfig>,

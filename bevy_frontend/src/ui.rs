@@ -5,6 +5,39 @@ use crate::{
     storage::*, world::*,
 };
 
+pub(crate) struct FoundryUiPlugin;
+
+impl Plugin for FoundryUiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup)
+            .add_systems(
+                Update,
+                (craft_menu_toggle_system, ui_close_system).in_set(UpdateSet::Input),
+            )
+            .add_systems(Update, (storage_status_text_system,))
+            .add_systems(
+                Update,
+                (
+                    ui_visibility_system,
+                    hotbar_auto_assign_system,
+                    hotbar_button_system,
+                    hotbar_ui_system,
+                    craft_menu_text_system,
+                    inventory_cell_hover_system,
+                    crafting_recipe_button_system,
+                    crafting_panel_text_system,
+                    crafting_recipe_visual_system,
+                    pickup_notice_spawn_system,
+                    pickup_notice_lifetime_system,
+                    chest_ui_system,
+                    furnace_ui_system,
+                )
+                    .in_set(UpdateSet::Ui),
+            )
+            .add_systems(Update, (world_stats_text_system,).in_set(UpdateSet::World));
+    }
+}
+
 pub(crate) fn setup(
     mut commands: Commands,
     config: Res<WorldRenderConfig>,
