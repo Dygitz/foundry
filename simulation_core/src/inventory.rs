@@ -50,3 +50,6 @@ impl Inventory {
         self.counts.iter().map(|(k, v)| (*k, *v))
     }
 }
+
+#[cfg(test)]
+mod tests;

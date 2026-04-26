@@ -189,3 +189,6 @@ pub fn deposit_to_furnace_fuel(
     };
     deposit_to_slot(&mut furnace.state.fuel, item, amount)
 }
+
+#[cfg(test)]
+mod tests;
