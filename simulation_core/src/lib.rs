@@ -93,11 +93,11 @@ impl<'a> SimChunkView<'a> {
 pub mod containers;
 pub mod inventory;
 pub use containers::{
+    CHEST_SLOT_COUNT, ChestRecord, ContainerInv, FurnaceRecord, FurnaceSlot, FurnaceState, Slot,
     deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input, take_from_chest,
-    take_from_furnace, ChestRecord, ContainerInv, FurnaceRecord, FurnaceSlot, FurnaceState, Slot,
-    CHEST_SLOT_COUNT,
+    take_from_furnace,
 };
 pub use inventory::{
-    Inventory, ItemId, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE,
-    ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE,
+    ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE, ITEM_IRON_ORE,
+    ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE, Inventory, ItemId,
 };

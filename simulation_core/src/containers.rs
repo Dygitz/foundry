@@ -1,4 +1,4 @@
-use crate::{ItemId, ObjectId, ITEM_NONE};
+use crate::{ITEM_NONE, ItemId, ObjectId};
 
 pub const CHEST_SLOT_COUNT: usize = 16;
 
@@ -117,7 +117,9 @@ pub fn take_from_chest(
     slot_idx: usize,
     amount: u32,
 ) -> Option<Slot> {
-    let chest = chests.iter_mut().find(|chest| chest.object_id == object_id)?;
+    let chest = chests
+        .iter_mut()
+        .find(|chest| chest.object_id == object_id)?;
     let slot = chest.inv.slots.get_mut(slot_idx)?;
     take_from_slot(slot, amount)
 }
@@ -147,7 +149,9 @@ pub fn take_from_furnace(
     slot_kind: FurnaceSlot,
     amount: u32,
 ) -> Option<Slot> {
-    let furnace = furnaces.iter_mut().find(|furnace| furnace.object_id == object_id)?;
+    let furnace = furnaces
+        .iter_mut()
+        .find(|furnace| furnace.object_id == object_id)?;
     let slot = match slot_kind {
         FurnaceSlot::Input => &mut furnace.state.input,
         FurnaceSlot::Fuel => &mut furnace.state.fuel,
@@ -162,7 +166,9 @@ pub fn deposit_to_furnace_input(
     item: ItemId,
     amount: u32,
 ) -> u32 {
-    let furnace = furnaces.iter_mut().find(|furnace| furnace.object_id == object_id);
+    let furnace = furnaces
+        .iter_mut()
+        .find(|furnace| furnace.object_id == object_id);
     let Some(furnace) = furnace else {
         return 0;
     };
@@ -175,7 +181,9 @@ pub fn deposit_to_furnace_fuel(
     item: ItemId,
     amount: u32,
 ) -> u32 {
-    let furnace = furnaces.iter_mut().find(|furnace| furnace.object_id == object_id);
+    let furnace = furnaces
+        .iter_mut()
+        .find(|furnace| furnace.object_id == object_id);
     let Some(furnace) = furnace else {
         return 0;
     };

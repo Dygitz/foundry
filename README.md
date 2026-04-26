@@ -27,6 +27,7 @@ This repo is structured to keep simulation/game state independent from rendering
 - Move: WASD / Arrow keys
 - Mine / interact: Left click (resource tiles; open chest/furnace UI)
 - Craft menu: E to open/close; 1-2 to craft
+- Map: M to open/close; drag to pan; mouse wheel to zoom
 - Place structure: F furnace, C chest, Esc clear; left click to place
 - Close UI panels: Esc or right click
 - Zoom: Mouse wheel

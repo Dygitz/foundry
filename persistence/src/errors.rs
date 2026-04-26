@@ -24,10 +24,9 @@ impl fmt::Display for StorageError {
                 write!(f, "storage transaction failed: {message}")
             }
             StorageError::DecodeFailed(message) => write!(f, "decode failed: {message}"),
-            StorageError::VersionMismatch { expected, found } => write!(
-                f,
-                "version mismatch (expected {expected}, found {found})"
-            ),
+            StorageError::VersionMismatch { expected, found } => {
+                write!(f, "version mismatch (expected {expected}, found {found})")
+            }
             StorageError::PermissionDenied => write!(f, "storage permission denied"),
             StorageError::Other(message) => write!(f, "storage error: {message}"),
         }

@@ -1,9 +1,9 @@
 use crate::errors::{Result, StorageError};
 use crate::traits::ChunkCodec;
 use simulation_core::{
-    ChestRecord, ChunkCoord, ContainerInv, FurnaceRecord, FurnaceState, ResourceCell, Slot,
-    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, Entity, PlacedCell, PLACED_NONE, RES_NONE,
-    SimChunkData, SimChunkView, TileId,
+    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, ChestRecord, ChunkCoord, ContainerInv, Entity,
+    FurnaceRecord, FurnaceState, PLACED_NONE, PlacedCell, RES_NONE, ResourceCell, SimChunkData,
+    SimChunkView, Slot, TileId,
 };
 
 const MAGIC: [u8; 4] = *b"CHNK";
@@ -24,7 +24,9 @@ pub struct ChunkCodecV1 {
 
 impl ChunkCodecV1 {
     pub fn new(game_schema_version: u16) -> Self {
-        Self { game_schema_version }
+        Self {
+            game_schema_version,
+        }
     }
 }
 
@@ -57,9 +59,8 @@ impl ChunkCodec for ChunkCodecV1 {
 
         // NOTE: checksum is computed by the storage layer, not the codec.
         let payload = encode_payload_v4(chunk)?;
-        let payload_len = u32::try_from(payload.len()).map_err(|_| {
-            StorageError::Other("payload length exceeds u32::MAX".to_string())
-        })?;
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| StorageError::Other("payload length exceeds u32::MAX".to_string()))?;
 
         let mut buffer = Vec::with_capacity(header_len() + payload.len());
         buffer.extend_from_slice(&MAGIC);
@@ -127,8 +128,13 @@ impl ChunkCodec for ChunkCodecV1 {
         let payload_bytes = reader.take(payload_len)?;
         let (tiles, entities, resources, placed, chests, furnaces) = if format_version == 1 {
             let (tiles, entities) = decode_payload_v1(payload_bytes)?;
-            let resources =
-                vec![ResourceCell { kind: RES_NONE, amount: 0 }; CHUNK_TILE_COUNT];
+            let resources = vec![
+                ResourceCell {
+                    kind: RES_NONE,
+                    amount: 0
+                };
+                CHUNK_TILE_COUNT
+            ];
             let placed = vec![
                 PlacedCell {
                     kind: PLACED_NONE,
@@ -169,24 +175,18 @@ impl ChunkCodec for ChunkCodecV1 {
 }
 
 fn encode_payload_v4(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
-    let tiles_len = u32::try_from(chunk.tiles.len()).map_err(|_| {
-        StorageError::Other("tiles length exceeds u32::MAX".to_string())
-    })?;
-    let entity_count = u32::try_from(chunk.entities.len()).map_err(|_| {
-        StorageError::Other("entity count exceeds u32::MAX".to_string())
-    })?;
-    let resource_len = u32::try_from(chunk.resources.len()).map_err(|_| {
-        StorageError::Other("resources length exceeds u32::MAX".to_string())
-    })?;
-    let placed_len = u32::try_from(chunk.placed.len()).map_err(|_| {
-        StorageError::Other("placed length exceeds u32::MAX".to_string())
-    })?;
-    let chest_count = u32::try_from(chunk.chests.len()).map_err(|_| {
-        StorageError::Other("chest count exceeds u32::MAX".to_string())
-    })?;
-    let furnace_count = u32::try_from(chunk.furnaces.len()).map_err(|_| {
-        StorageError::Other("furnace count exceeds u32::MAX".to_string())
-    })?;
+    let tiles_len = u32::try_from(chunk.tiles.len())
+        .map_err(|_| StorageError::Other("tiles length exceeds u32::MAX".to_string()))?;
+    let entity_count = u32::try_from(chunk.entities.len())
+        .map_err(|_| StorageError::Other("entity count exceeds u32::MAX".to_string()))?;
+    let resource_len = u32::try_from(chunk.resources.len())
+        .map_err(|_| StorageError::Other("resources length exceeds u32::MAX".to_string()))?;
+    let placed_len = u32::try_from(chunk.placed.len())
+        .map_err(|_| StorageError::Other("placed length exceeds u32::MAX".to_string()))?;
+    let chest_count = u32::try_from(chunk.chests.len())
+        .map_err(|_| StorageError::Other("chest count exceeds u32::MAX".to_string()))?;
+    let furnace_count = u32::try_from(chunk.furnaces.len())
+        .map_err(|_| StorageError::Other("furnace count exceeds u32::MAX".to_string()))?;
 
     let mut buffer = Vec::with_capacity(
         4 + (chunk.tiles.len() * 2)
@@ -609,9 +609,10 @@ impl<'a> Reader<'a> {
             .offset
             .checked_add(len)
             .ok_or_else(|| StorageError::DecodeFailed("read overflow".to_string()))?;
-        let slice = self.bytes.get(self.offset..end).ok_or_else(|| {
-            StorageError::DecodeFailed("unexpected end of data".to_string())
-        })?;
+        let slice = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| StorageError::DecodeFailed("unexpected end of data".to_string()))?;
         self.offset = end;
         Ok(slice)
     }

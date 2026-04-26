@@ -1,32 +1,33 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use bevy::image::ImageSampler;
-use bevy::input::keyboard::KeyCode;
-use bevy::input::mouse::MouseWheel;
-use bevy::input::ButtonInput;
-use bevy::log::{info, warn};
 use bevy::ecs::prelude::ChildSpawnerCommands;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::SystemParam;
+use bevy::image::ImageSampler;
+use bevy::input::ButtonInput;
+use bevy::input::keyboard::KeyCode;
+use bevy::input::mouse::MouseWheel;
+use bevy::log::{info, warn};
 use bevy::prelude::*;
 use bevy::render::camera::{OrthographicProjection, Projection};
-use bevy::window::{Window, WindowPlugin};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::tasks::futures_lite::future;
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use bevy::window::{Window, WindowPlugin};
 use persistence::{
-    ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite,
-    PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId, WorldStorage,
+    ChunkCodec, ChunkCodecV1, ChunkCoord, ChunkKey, ChunkLayer, ChunkRecordWrite, MapChunkRecord,
+    MapChunkRecordWrite, PlayerStateRecordWrite, RecoveryReport, StorageError, WorldId,
+    WorldStorage,
 };
 use simulation_core::{
-    deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input, take_from_chest,
-    take_from_furnace, ChestRecord, ContainerInv, FurnaceRecord, FurnaceSlot, FurnaceState,
-    Inventory, ItemId, ObjectId, PlacedCell, PlacedId, ResourceCell, ResourceId, SimChunkData,
-    SimChunkView, TileId, CHEST_SLOT_COUNT, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE,
-    ITEM_COPPER_PLATE, ITEM_FURNACE, ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE,
-    PLACED_CHEST, PLACED_FURNACE, PLACED_NONE, RES_COAL, RES_COPPER, RES_IRON, RES_NONE,
-    RES_STONE, CHUNK_EDGE, CHUNK_TILE_COUNT,
+    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, ChestRecord, ContainerInv, FurnaceRecord,
+    FurnaceSlot, FurnaceState, ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE,
+    ITEM_FURNACE, ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE, Inventory, ItemId,
+    ObjectId, PLACED_CHEST, PLACED_FURNACE, PLACED_NONE, PlacedCell, PlacedId, RES_COAL,
+    RES_COPPER, RES_IRON, RES_NONE, RES_STONE, ResourceCell, ResourceId, SimChunkData,
+    SimChunkView, TileId, deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input,
+    take_from_chest, take_from_furnace,
 };
 use web_storage_indexeddb::IndexedDbStorage;
 
@@ -51,19 +52,23 @@ pub fn run() {
         .insert_resource(AutosaveState::default())
         .insert_resource(SaveQueue::default())
         .insert_resource(ChunkLoadState::default())
+        .insert_resource(MapState::default())
+        .insert_resource(MapLoadState::default())
+        .insert_resource(MapSaveState::default())
         .insert_resource(RecoveryState::default())
         .add_event::<ChunkLoadRequest>()
         .add_event::<ChunkLoaded>()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    fit_canvas_to_parent: true,
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                fit_canvas_to_parent: true,
                 ..default()
             }),
+            ..default()
+        }))
+        .configure_sets(
+            Update,
+            (UpdateSet::Input, UpdateSet::Ui, UpdateSet::World).chain(),
         )
-        .configure_sets(Update, (UpdateSet::Input, UpdateSet::Ui, UpdateSet::World).chain())
         .add_systems(Startup, (setup, init_storage))
         .add_systems(
             Update,
@@ -82,6 +87,8 @@ pub fn run() {
                 player_movement_system,
                 player_visual_system,
                 craft_menu_toggle_system,
+                map_toggle_system,
+                full_map_input_system,
                 placement_select_system,
                 ui_close_system,
                 inventory_debug_input_system,
@@ -89,10 +96,7 @@ pub fn run() {
             )
                 .in_set(UpdateSet::Input),
         )
-        .add_systems(
-            Update,
-            (mining_input_system,).in_set(UpdateSet::Input),
-        )
+        .add_systems(Update, (mining_input_system,).in_set(UpdateSet::Input))
         .add_systems(
             Update,
             (
@@ -102,15 +106,16 @@ pub fn run() {
                 craft_menu_text_system,
                 chest_ui_system,
                 furnace_ui_system,
+                minimap_visibility_system,
+                map_load_pump_system,
+                map_save_system,
+                map_ui_render_system,
                 chest_button_system,
                 furnace_button_system,
             )
                 .in_set(UpdateSet::Ui),
         )
-        .add_systems(
-            Update,
-            (player_state_save_system,).in_set(UpdateSet::Ui),
-        )
+        .add_systems(Update, (player_state_save_system,).in_set(UpdateSet::Ui))
         .add_systems(
             Update,
             (
@@ -172,7 +177,8 @@ impl WorldRuntime {
     }
 
     fn touch(&mut self, key: &ChunkKey) {
-        self.last_access_frame.insert(key.clone(), self.frame_counter);
+        self.last_access_frame
+            .insert(key.clone(), self.frame_counter);
     }
 
     fn evictable_candidates(&self) -> Vec<ChunkKey> {
@@ -259,7 +265,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             db_name: "game_worlds".to_string(),
-            db_version: 2,
+            db_version: 3,
             game_schema_version: 1,
         }
     }
@@ -393,6 +399,65 @@ impl Default for ChunkLoadState {
     }
 }
 
+struct MapChunk {
+    rgba: Vec<u8>,
+    image: Handle<Image>,
+    updated_at_ms: u64,
+}
+
+#[derive(Resource, Default)]
+struct MapState {
+    explored: HashMap<ChunkKey, MapChunk>,
+    pending_saves: VecDeque<MapChunkRecordWrite>,
+    queued_for_save: HashSet<ChunkKey>,
+    full_view: FullMapView,
+    drag_last_cursor: Option<Vec2>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FullMapView {
+    center_tile: Vec2,
+    px_per_tile: f32,
+}
+
+impl Default for FullMapView {
+    fn default() -> Self {
+        Self {
+            center_tile: Vec2::ZERO,
+            px_per_tile: FULL_MAP_DEFAULT_PX_PER_TILE,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct MapLoadState {
+    task: Option<Task<Result<Vec<MapChunkRecord>, StorageError>>>,
+    loaded: bool,
+}
+
+#[derive(Resource)]
+struct MapSaveState {
+    timer: Timer,
+    max_per_flush: usize,
+    in_flight: Option<MapSaveTask>,
+}
+
+impl Default for MapSaveState {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+            max_per_flush: 64,
+            in_flight: None,
+        }
+    }
+}
+
+struct MapSaveTask {
+    task: Task<Result<(), StorageError>>,
+    pending_count: usize,
+    keys: Vec<ChunkKey>,
+}
+
 #[derive(Component)]
 struct StorageStatusText;
 
@@ -416,6 +481,20 @@ struct UiOverlay;
 
 #[derive(Component)]
 struct UiPanelRoot;
+
+#[derive(Component)]
+struct MinimapRoot;
+
+#[derive(Component, Copy, Clone, PartialEq, Eq)]
+enum MapSurfaceKind {
+    Minimap,
+    Full,
+}
+
+#[derive(Component, Copy, Clone)]
+struct MapContent {
+    kind: MapSurfaceKind,
+}
 
 #[derive(Component)]
 struct CraftPanelText;
@@ -492,6 +571,7 @@ struct UiState {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum UiMode {
     None,
+    Map,
     Crafting,
     Chest { object_id: ObjectId },
     Furnace { object_id: ObjectId },
@@ -509,6 +589,14 @@ enum UpdateSet {
     Ui,
     World,
 }
+
+const MAP_CHUNK_BYTES: usize = CHUNK_TILE_COUNT * 4;
+const MINIMAP_SIZE: f32 = 192.0;
+const MINIMAP_MARGIN: f32 = 16.0;
+const MINIMAP_PX_PER_TILE: f32 = 1.0;
+const FULL_MAP_DEFAULT_PX_PER_TILE: f32 = 2.0;
+const FULL_MAP_MIN_PX_PER_TILE: f32 = 0.25;
+const FULL_MAP_MAX_PX_PER_TILE: f32 = 8.0;
 
 #[derive(Resource)]
 struct PlayerStateSaveState {
@@ -689,12 +777,76 @@ Plates: Iron 0 | Copper 0 | Furnace 0 | Chest 0",
         .with_children(|parent| {
             parent.spawn((
                 Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
                     ..default()
                 },
                 UiPanelRoot,
+            ));
+        });
+    commands
+        .spawn((
+            Node {
+                width: Val::Px(MINIMAP_SIZE),
+                height: Val::Px(MINIMAP_SIZE),
+                position_type: PositionType::Absolute,
+                right: Val::Px(MINIMAP_MARGIN),
+                bottom: Val::Px(MINIMAP_MARGIN),
+                overflow: Overflow::clip(),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(map_unknown_color()),
+            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.35)),
+            MinimapRoot,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                MapContent {
+                    kind: MapSurfaceKind::Minimap,
+                },
+            ));
+        });
+}
+
+fn spawn_map_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Relative,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(map_unknown_color()),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                MapContent {
+                    kind: MapSurfaceKind::Full,
+                },
             ));
         });
 }
@@ -1056,10 +1208,7 @@ fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Pla
     }
 }
 
-fn craft_menu_toggle_system(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut ui_state: ResMut<UiState>,
-) {
+fn craft_menu_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut ui_state: ResMut<UiState>) {
     if !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
@@ -1067,6 +1216,78 @@ fn craft_menu_toggle_system(
         UiMode::None => ui_state.mode = UiMode::Crafting,
         UiMode::Crafting => ui_state.mode = UiMode::None,
         _ => {}
+    }
+}
+
+fn map_toggle_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    config: Res<WorldRenderConfig>,
+    mut ui_state: ResMut<UiState>,
+    mut map: ResMut<MapState>,
+    player_query: Query<&Transform, With<Player>>,
+) {
+    if !keys.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+    match ui_state.mode {
+        UiMode::Map => {
+            ui_state.mode = UiMode::None;
+            map.drag_last_cursor = None;
+        }
+        UiMode::None => {
+            if let Ok(transform) = player_query.single() {
+                map.full_view.center_tile =
+                    world_pos_to_tile_pos(transform.translation.truncate(), &config);
+            }
+            map.full_view.px_per_tile = FULL_MAP_DEFAULT_PX_PER_TILE;
+            map.drag_last_cursor = None;
+            ui_state.mode = UiMode::Map;
+        }
+        _ => {}
+    }
+}
+
+fn full_map_input_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut scroll: EventReader<MouseWheel>,
+    windows: Query<&Window>,
+    ui_state: Res<UiState>,
+    mut map: ResMut<MapState>,
+) {
+    if ui_state.mode != UiMode::Map {
+        map.drag_last_cursor = None;
+        scroll.clear();
+        return;
+    }
+
+    for ev in scroll.read() {
+        let factor = (1.0 + ev.y * 0.12).clamp(0.7, 1.3);
+        map.full_view.px_per_tile = (map.full_view.px_per_tile * factor)
+            .clamp(FULL_MAP_MIN_PX_PER_TILE, FULL_MAP_MAX_PX_PER_TILE);
+    }
+
+    let Ok(window) = windows.single() else {
+        map.drag_last_cursor = None;
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        map.drag_last_cursor = None;
+        return;
+    };
+
+    if buttons.just_pressed(MouseButton::Left) {
+        map.drag_last_cursor = Some(cursor);
+        return;
+    }
+    if buttons.pressed(MouseButton::Left) {
+        if let Some(previous) = map.drag_last_cursor {
+            let delta = cursor - previous;
+            map.full_view.center_tile.x -= delta.x / map.full_view.px_per_tile;
+            map.full_view.center_tile.y += delta.y / map.full_view.px_per_tile;
+        }
+        map.drag_last_cursor = Some(cursor);
+    } else {
+        map.drag_last_cursor = None;
     }
 }
 
@@ -1106,6 +1327,12 @@ fn ui_visibility_system(
     match ui_state.mode {
         UiMode::None => {
             *overlay_visibility = Visibility::Hidden;
+        }
+        UiMode::Map => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_map_panel(parent));
         }
         UiMode::Crafting => {
             *overlay_visibility = Visibility::Visible;
@@ -1191,6 +1418,7 @@ struct MiningParams<'w, 's> {
     status: ResMut<'w, StorageStatus>,
     debug: Res<'w, DebugConfig>,
     highlight: ResMut<'w, ClickHighlight>,
+    map: ResMut<'w, MapState>,
 }
 
 fn mining_input_system(
@@ -1238,9 +1466,13 @@ fn mining_input_system(
     let tile_x = (world_pos.x / params.config.tile_size).floor() as i32;
     let tile_y = (world_pos.y / params.config.tile_size).floor() as i32;
     if params.placement.selected.is_none() {
-        if let Some(open_panel) =
-            open_panel_for_tile(tile_x, tile_y, &params.config, &params.session, &params.runtime)
-        {
+        if let Some(open_panel) = open_panel_for_tile(
+            tile_x,
+            tile_y,
+            &params.config,
+            &params.session,
+            &params.runtime,
+        ) {
             params.ui_state.mode = open_panel;
             return;
         }
@@ -1277,6 +1509,7 @@ fn mining_input_system(
             &mut params.runtime,
             &mut params.player,
             &mut params.images,
+            &mut params.map,
             &params.services,
             &params.time,
             &mut params.queue,
@@ -1299,6 +1532,7 @@ fn mining_input_system(
         &mut params.runtime,
         &mut params.player,
         &mut params.images,
+        &mut params.map,
         &params.services,
         &params.time,
         &mut params.queue,
@@ -1318,6 +1552,7 @@ fn mining_input_system(
                     &mut params.runtime,
                     &mut params.player,
                     &mut params.images,
+                    &mut params.map,
                     &params.services,
                     &params.time,
                     &mut params.queue,
@@ -1364,8 +1599,7 @@ const RECIPE_CHEST: Recipe = Recipe {
 
 const FURNACE_PROGRESS_PER_ITEM: u16 = 1000;
 const FURNACE_SECONDS_PER_ITEM: f32 = 2.0;
-const FURNACE_PROGRESS_PER_SEC: f32 =
-    FURNACE_PROGRESS_PER_ITEM as f32 / FURNACE_SECONDS_PER_ITEM;
+const FURNACE_PROGRESS_PER_SEC: f32 = FURNACE_PROGRESS_PER_ITEM as f32 / FURNACE_SECONDS_PER_ITEM;
 
 fn smelt_output_for_input(item: ItemId) -> Option<ItemId> {
     match item {
@@ -1445,6 +1679,7 @@ fn try_mine_at_world_pos(
     runtime: &mut WorldRuntime,
     player: &mut PlayerState,
     images: &mut Assets<Image>,
+    map: &mut MapState,
     services: &StorageServices,
     time: &Time,
     queue: &mut SaveQueue,
@@ -1455,19 +1690,8 @@ fn try_mine_at_world_pos(
     let tile_x = (world_pos.x / config.tile_size).floor() as i32;
     let tile_y = (world_pos.y / config.tile_size).floor() as i32;
     let mined = try_mine_tile(
-        tile_x,
-        tile_y,
-        config,
-        session,
-        runtime,
-        player,
-        images,
-        services,
-        time,
-        queue,
-        status,
-        log,
-        highlight,
+        tile_x, tile_y, config, session, runtime, player, images, map, services, time, queue,
+        status, log, highlight,
     )
     .is_mined();
     if log {
@@ -1487,6 +1711,7 @@ fn try_mine_tile(
     runtime: &mut WorldRuntime,
     player: &mut PlayerState,
     images: &mut Assets<Image>,
+    map: &mut MapState,
     services: &StorageServices,
     time: &Time,
     queue: &mut SaveQueue,
@@ -1546,6 +1771,14 @@ fn try_mine_tile(
         session.world_seed,
         highlight,
     );
+    upsert_map_snapshot(
+        map,
+        images,
+        &key,
+        &data_snapshot,
+        session.world_seed,
+        time.elapsed().as_millis() as u64,
+    );
     queue_chunk_save(
         &key,
         &data_snapshot,
@@ -1581,6 +1814,7 @@ fn try_place_at_world_pos(
     runtime: &mut WorldRuntime,
     player: &mut PlayerState,
     images: &mut Assets<Image>,
+    map: &mut MapState,
     services: &StorageServices,
     time: &Time,
     queue: &mut SaveQueue,
@@ -1590,19 +1824,8 @@ fn try_place_at_world_pos(
     let tile_x = (world_pos.x / config.tile_size).floor() as i32;
     let tile_y = (world_pos.y / config.tile_size).floor() as i32;
     try_place_tile(
-        tile_x,
-        tile_y,
-        item,
-        config,
-        session,
-        runtime,
-        player,
-        images,
-        services,
-        time,
-        queue,
-        status,
-        highlight,
+        tile_x, tile_y, item, config, session, runtime, player, images, map, services, time, queue,
+        status, highlight,
     )
 }
 
@@ -1615,6 +1838,7 @@ fn try_place_tile(
     runtime: &mut WorldRuntime,
     player: &mut PlayerState,
     images: &mut Assets<Image>,
+    map: &mut MapState,
     services: &StorageServices,
     time: &Time,
     queue: &mut SaveQueue,
@@ -1677,10 +1901,7 @@ fn try_place_tile(
                 });
             }
         }
-        (
-            loaded.texture_handle.clone(),
-            loaded.data.clone(),
-        )
+        (loaded.texture_handle.clone(), loaded.data.clone())
     };
 
     runtime.touch(&key);
@@ -1691,6 +1912,14 @@ fn try_place_tile(
         config,
         session.world_seed,
         highlight,
+    );
+    upsert_map_snapshot(
+        map,
+        images,
+        &key,
+        &data_snapshot,
+        session.world_seed,
+        time.elapsed().as_millis() as u64,
     );
     queue_chunk_save(
         &key,
@@ -1773,6 +2002,205 @@ fn placement_text_system(
     }
 }
 
+fn minimap_visibility_system(
+    ui_state: Res<UiState>,
+    mut query: Query<&mut Visibility, With<MinimapRoot>>,
+) {
+    if !ui_state.is_changed() {
+        return;
+    }
+    let visible = if ui_state.mode == UiMode::Map {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    for mut visibility in &mut query {
+        *visibility = visible;
+    }
+}
+
+fn map_load_pump_system(
+    init_task: Res<StorageInitTask>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    config: Res<WorldRenderConfig>,
+    mut load: ResMut<MapLoadState>,
+    mut map: ResMut<MapState>,
+    mut images: ResMut<Assets<Image>>,
+    mut status: ResMut<StorageStatus>,
+) {
+    if load.loaded || !init_task.ready {
+        return;
+    }
+
+    if load.task.is_none() {
+        let storage = services.storage.clone();
+        let world_id = session.world_id.clone();
+        let layer = config.layer;
+        load.task = Some(
+            AsyncComputeTaskPool::get()
+                .spawn_local(async move { storage.load_map_chunks(&world_id, layer).await }),
+        );
+    }
+
+    let Some(task) = load.task.as_mut() else {
+        return;
+    };
+    let Some(result) = future::block_on(future::poll_once(task)) else {
+        return;
+    };
+
+    match result {
+        Ok(records) => {
+            for record in records {
+                if record.rgba.len() != MAP_CHUNK_BYTES {
+                    status.record_error(&StorageError::DecodeFailed(format!(
+                        "map chunk {} has {} bytes, expected {MAP_CHUNK_BYTES}",
+                        record.key.to_key_string(),
+                        record.rgba.len()
+                    )));
+                    continue;
+                }
+                let image = images.add(build_map_chunk_image(&record.rgba));
+                map.explored.insert(
+                    record.key,
+                    MapChunk {
+                        rgba: record.rgba,
+                        image,
+                        updated_at_ms: record.updated_at_ms,
+                    },
+                );
+            }
+            status.mark_ok();
+        }
+        Err(error) => status.record_error(&error),
+    }
+    load.task = None;
+    load.loaded = true;
+}
+
+fn map_save_system(
+    time: Res<Time>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut map: ResMut<MapState>,
+    mut save: ResMut<MapSaveState>,
+    mut status: ResMut<StorageStatus>,
+) {
+    save.timer.tick(time.delta());
+
+    if let Some(mut save_task) = save.in_flight.take() {
+        if let Some(result) = future::block_on(future::poll_once(&mut save_task.task)) {
+            match result {
+                Ok(()) => {
+                    for _ in 0..save_task.pending_count {
+                        if let Some(record) = map.pending_saves.pop_front() {
+                            map.queued_for_save.remove(&record.key);
+                        }
+                    }
+                    for key in save_task.keys {
+                        if map.pending_saves.iter().any(|record| record.key == key) {
+                            map.queued_for_save.insert(key);
+                        }
+                    }
+                    status.mark_ok();
+                }
+                Err(error) => status.record_error(&error),
+            }
+        } else {
+            save.in_flight = Some(save_task);
+            return;
+        }
+    }
+
+    if save.in_flight.is_some()
+        || status.state == StorageState::Paused
+        || !save.timer.just_finished()
+        || map.pending_saves.is_empty()
+    {
+        return;
+    }
+
+    let batch: Vec<MapChunkRecordWrite> = map
+        .pending_saves
+        .iter()
+        .take(save.max_per_flush)
+        .cloned()
+        .collect();
+    if batch.is_empty() {
+        return;
+    }
+    let pending_count = batch.len();
+    let keys = batch.iter().map(|record| record.key.clone()).collect();
+    let storage = services.storage.clone();
+    let world_id = session.world_id.clone();
+    save.in_flight = Some(MapSaveTask {
+        task: AsyncComputeTaskPool::get()
+            .spawn_local(async move { storage.put_map_chunks(&world_id, batch).await }),
+        pending_count,
+        keys,
+    });
+}
+
+fn map_ui_render_system(
+    mut commands: Commands,
+    map: Res<MapState>,
+    ui_state: Res<UiState>,
+    windows: Query<&Window>,
+    config: Res<WorldRenderConfig>,
+    player_query: Query<&Transform, With<Player>>,
+    content_query: Query<(Entity, &MapContent)>,
+    children_query: Query<&Children, With<MapContent>>,
+) {
+    let Ok(player_transform) = player_query.single() else {
+        return;
+    };
+    let player_tile = world_pos_to_tile_pos(player_transform.translation.truncate(), &config);
+    let window_size = windows
+        .single()
+        .map(|window| Vec2::new(window.width(), window.height()))
+        .unwrap_or(Vec2::new(MINIMAP_SIZE, MINIMAP_SIZE));
+
+    for (entity, content) in &content_query {
+        if content.kind == MapSurfaceKind::Minimap && ui_state.mode == UiMode::Map {
+            clear_map_content(&mut commands, entity, &children_query);
+            continue;
+        }
+        if content.kind == MapSurfaceKind::Full && ui_state.mode != UiMode::Map {
+            clear_map_content(&mut commands, entity, &children_query);
+            continue;
+        }
+
+        let (viewport, center_tile, px_per_tile, marker_size) = match content.kind {
+            MapSurfaceKind::Minimap => (
+                Vec2::splat(MINIMAP_SIZE),
+                player_tile,
+                MINIMAP_PX_PER_TILE,
+                5.0,
+            ),
+            MapSurfaceKind::Full => (
+                window_size,
+                map.full_view.center_tile,
+                map.full_view.px_per_tile,
+                8.0,
+            ),
+        };
+
+        clear_map_content(&mut commands, entity, &children_query);
+        commands.entity(entity).with_children(|parent| {
+            spawn_map_chunk_nodes(parent, &map, center_tile, px_per_tile, viewport);
+            spawn_map_player_marker(
+                parent,
+                player_tile,
+                center_tile,
+                px_per_tile,
+                viewport,
+                marker_size,
+            );
+        });
+    }
+}
+
 fn chest_ui_system(
     ui_state: Res<UiState>,
     runtime: Res<WorldRuntime>,
@@ -1820,9 +2248,7 @@ fn furnace_ui_system(
     let width = furnace
         .map(|furnace| {
             200.0
-                * (furnace.state.progress as f32
-                    / FURNACE_PROGRESS_PER_ITEM as f32)
-                    .clamp(0.0, 1.0)
+                * (furnace.state.progress as f32 / FURNACE_PROGRESS_PER_ITEM as f32).clamp(0.0, 1.0)
         })
         .unwrap_or(0.0);
     for mut node in &mut bar_query {
@@ -1951,18 +2377,12 @@ fn furnace_button_system(
             continue;
         }
         let result = with_furnace_mut(&mut runtime, object_id, |data| match button.slot {
-            FurnaceSlot::Input => deposit_to_furnace_input(
-                &mut data.furnaces,
-                object_id,
-                button.item,
-                amount,
-            ),
-            FurnaceSlot::Fuel => deposit_to_furnace_fuel(
-                &mut data.furnaces,
-                object_id,
-                button.item,
-                amount,
-            ),
+            FurnaceSlot::Input => {
+                deposit_to_furnace_input(&mut data.furnaces, object_id, button.item, amount)
+            }
+            FurnaceSlot::Fuel => {
+                deposit_to_furnace_fuel(&mut data.furnaces, object_id, button.item, amount)
+            }
             FurnaceSlot::Output => 0,
         });
         if let Some((key, snapshot, moved)) = result {
@@ -2019,8 +2439,7 @@ fn furnace_smelting_system(
             }
 
             let output_item = output_item.unwrap();
-            let mut progress =
-                furnace.state.progress as f32 + delta * FURNACE_PROGRESS_PER_SEC;
+            let mut progress = furnace.state.progress as f32 + delta * FURNACE_PROGRESS_PER_SEC;
 
             while progress >= FURNACE_PROGRESS_PER_ITEM as f32 {
                 if furnace.state.input.is_empty()
@@ -2031,13 +2450,11 @@ fn furnace_smelting_system(
                     break;
                 }
 
-                furnace.state.input.count =
-                    furnace.state.input.count.saturating_sub(1);
+                furnace.state.input.count = furnace.state.input.count.saturating_sub(1);
                 if furnace.state.input.count == 0 {
                     furnace.state.input.clear();
                 }
-                furnace.state.fuel.count =
-                    furnace.state.fuel.count.saturating_sub(1);
+                furnace.state.fuel.count = furnace.state.fuel.count.saturating_sub(1);
                 if furnace.state.fuel.count == 0 {
                     furnace.state.fuel.clear();
                 }
@@ -2045,8 +2462,7 @@ fn furnace_smelting_system(
                     furnace.state.output.item = output_item;
                     furnace.state.output.count = 1;
                 } else {
-                    furnace.state.output.count =
-                        furnace.state.output.count.saturating_add(1);
+                    furnace.state.output.count = furnace.state.output.count.saturating_add(1);
                 }
 
                 smelted_in_chunk = true;
@@ -2056,8 +2472,7 @@ fn furnace_smelting_system(
             let still_can_smelt = !furnace.state.input.is_empty()
                 && furnace.state.fuel.item == ITEM_COAL
                 && furnace.state.fuel.count > 0
-                && (furnace.state.output.is_empty()
-                    || furnace.state.output.item == output_item);
+                && (furnace.state.output.is_empty() || furnace.state.output.item == output_item);
 
             furnace.state.progress = if still_can_smelt {
                 progress.min(FURNACE_PROGRESS_PER_ITEM as f32) as u16
@@ -2232,18 +2647,18 @@ fn storage_init_pump_system(
     if init_task.ready && recovery.task.is_none() && !recovery.completed {
         let storage = services.storage.clone();
         let world_id = session.world_id.clone();
-        let task = AsyncComputeTaskPool::get().spawn_local(async move {
-            storage.recover_incomplete_savepoints(&world_id).await
-        });
+        let task = AsyncComputeTaskPool::get()
+            .spawn_local(async move { storage.recover_incomplete_savepoints(&world_id).await });
         recovery.task = Some(task);
     }
 
     if init_task.ready && recovery.completed && !load_state.loaded && load_state.task.is_none() {
         let storage = services.storage.clone();
         let world_id = session.world_id.clone();
-        load_state.task = Some(AsyncComputeTaskPool::get().spawn_local(async move {
-            storage.load_player_state(&world_id).await
-        }));
+        load_state.task = Some(
+            AsyncComputeTaskPool::get()
+                .spawn_local(async move { storage.load_player_state(&world_id).await }),
+        );
     }
 }
 
@@ -2338,9 +2753,10 @@ fn player_state_save_system(
     };
     let storage = services.storage.clone();
     save.dirty = false;
-    save.in_flight = Some(AsyncComputeTaskPool::get().spawn_local(async move {
-        storage.save_player_state(record).await
-    }));
+    save.in_flight = Some(
+        AsyncComputeTaskPool::get()
+            .spawn_local(async move { storage.save_player_state(record).await }),
+    );
 }
 
 fn autosave_flush_system(
@@ -2408,9 +2824,7 @@ fn autosave_flush_system(
     let chunk_keys: Vec<ChunkKey> = batch.iter().map(|record| record.key.clone()).collect();
     let save_keys = chunk_keys.clone();
     let task = AsyncComputeTaskPool::get().spawn_local(async move {
-        let savepoint_id = storage
-            .begin_savepoint(&world_id, tick, chunk_keys)
-            .await?;
+        let savepoint_id = storage.begin_savepoint(&world_id, tick, chunk_keys).await?;
         storage.put_chunks(&world_id, batch).await?;
         storage.commit_savepoint(&savepoint_id).await?;
         Ok(())
@@ -2499,6 +2913,7 @@ fn chunk_loaded_system(
     mut runtime: ResMut<WorldRuntime>,
     mut loaded_events: EventReader<ChunkLoaded>,
     mut images: ResMut<Assets<Image>>,
+    mut map: ResMut<MapState>,
     config: Res<WorldRenderConfig>,
     services: NonSend<StorageServices>,
     session: Res<WorldSession>,
@@ -2546,6 +2961,16 @@ fn chunk_loaded_system(
         if let Some(existing) = runtime.loaded.get_mut(&event.key) {
             existing.data = data;
             runtime.touch(&event.key);
+            if let Some(existing) = runtime.loaded.get(&event.key) {
+                upsert_map_snapshot(
+                    &mut map,
+                    &mut images,
+                    &event.key,
+                    &existing.data,
+                    session.world_seed,
+                    time.elapsed().as_millis() as u64,
+                );
+            }
             // Texture refresh will use existing.texture_handle once chunk diffing is wired up.
             continue;
         }
@@ -2579,6 +3004,16 @@ fn chunk_loaded_system(
                 texture_handle,
             },
         );
+        if let Some(loaded) = runtime.loaded.get(&event.key) {
+            upsert_map_snapshot(
+                &mut map,
+                &mut images,
+                &event.key,
+                &loaded.data,
+                session.world_seed,
+                time.elapsed().as_millis() as u64,
+            );
+        }
         runtime.touch(&event.key);
     }
 }
@@ -2900,17 +3335,208 @@ fn chunk_world_size(config: &WorldRenderConfig) -> f32 {
     config.tile_size * CHUNK_EDGE as f32
 }
 
-fn required_radius_chunks(
-    viewport: Vec2,
-    scale: f32,
-    chunk_size: f32,
-    margin: i32,
-) -> (i32, i32) {
+fn required_radius_chunks(viewport: Vec2, scale: f32, chunk_size: f32, margin: i32) -> (i32, i32) {
     let half_w = (viewport.x * 0.5) * scale;
     let half_h = (viewport.y * 0.5) * scale;
     let rx = (half_w / chunk_size).ceil() as i32 + margin;
     let ry = (half_h / chunk_size).ceil() as i32 + margin;
     (rx.max(0), ry.max(0))
+}
+
+fn world_pos_to_tile_pos(world_pos: Vec2, config: &WorldRenderConfig) -> Vec2 {
+    world_pos / config.tile_size
+}
+
+fn upsert_map_snapshot(
+    map: &mut MapState,
+    images: &mut Assets<Image>,
+    key: &ChunkKey,
+    data: &SimChunkData,
+    world_seed: u64,
+    updated_at_ms: u64,
+) {
+    let rgba = map_snapshot_pixels(data, world_seed);
+    let changed = match map.explored.get_mut(key) {
+        Some(chunk) if chunk.rgba == rgba => false,
+        Some(chunk) => {
+            chunk.rgba = rgba.clone();
+            chunk.updated_at_ms = updated_at_ms;
+            if let Some(image) = images.get_mut(&chunk.image) {
+                *image = build_map_chunk_image(&rgba);
+            } else {
+                chunk.image = images.add(build_map_chunk_image(&rgba));
+            }
+            true
+        }
+        None => {
+            let image = images.add(build_map_chunk_image(&rgba));
+            map.explored.insert(
+                key.clone(),
+                MapChunk {
+                    rgba: rgba.clone(),
+                    image,
+                    updated_at_ms,
+                },
+            );
+            true
+        }
+    };
+
+    if changed {
+        queue_map_snapshot_save(map, key.clone(), rgba, updated_at_ms);
+    }
+}
+
+fn queue_map_snapshot_save(map: &mut MapState, key: ChunkKey, rgba: Vec<u8>, updated_at_ms: u64) {
+    if let Some(existing) = map
+        .pending_saves
+        .iter_mut()
+        .find(|record| record.key == key)
+    {
+        existing.rgba = rgba;
+        existing.updated_at_ms = updated_at_ms;
+    } else {
+        map.pending_saves.push_back(MapChunkRecordWrite {
+            key: key.clone(),
+            rgba,
+            updated_at_ms,
+        });
+    }
+    map.queued_for_save.insert(key);
+}
+
+fn clear_map_content(
+    commands: &mut Commands,
+    entity: Entity,
+    children_query: &Query<&Children, With<MapContent>>,
+) {
+    if let Ok(children) = children_query.get(entity) {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+}
+
+fn spawn_map_chunk_nodes(
+    parent: &mut ChildSpawnerCommands,
+    map: &MapState,
+    center_tile: Vec2,
+    px_per_tile: f32,
+    viewport: Vec2,
+) {
+    let chunk_tiles = CHUNK_EDGE as f32;
+    let chunk_px = chunk_tiles * px_per_tile;
+    for (key, chunk) in &map.explored {
+        let min_x = key.coord.cx as f32 * chunk_tiles;
+        let max_y = (key.coord.cy as f32 + 1.0) * chunk_tiles;
+        let left = viewport.x * 0.5 + (min_x - center_tile.x) * px_per_tile;
+        let top = viewport.y * 0.5 - (max_y - center_tile.y) * px_per_tile;
+
+        if left > viewport.x || top > viewport.y || left + chunk_px < 0.0 || top + chunk_px < 0.0 {
+            continue;
+        }
+
+        parent.spawn((
+            ImageNode::new(chunk.image.clone()),
+            Node {
+                width: Val::Px(chunk_px),
+                height: Val::Px(chunk_px),
+                position_type: PositionType::Absolute,
+                left: Val::Px(left),
+                top: Val::Px(top),
+                ..default()
+            },
+        ));
+    }
+}
+
+fn spawn_map_player_marker(
+    parent: &mut ChildSpawnerCommands,
+    player_tile: Vec2,
+    center_tile: Vec2,
+    px_per_tile: f32,
+    viewport: Vec2,
+    size: f32,
+) {
+    let left = viewport.x * 0.5 + (player_tile.x - center_tile.x) * px_per_tile - size * 0.5;
+    let top = viewport.y * 0.5 - (player_tile.y - center_tile.y) * px_per_tile - size * 0.5;
+    if left > viewport.x || top > viewport.y || left + size < 0.0 || top + size < 0.0 {
+        return;
+    }
+    parent.spawn((
+        Node {
+            width: Val::Px(size),
+            height: Val::Px(size),
+            position_type: PositionType::Absolute,
+            left: Val::Px(left),
+            top: Val::Px(top),
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(1.0, 0.9, 0.25)),
+        BorderColor(Color::srgb(0.05, 0.05, 0.05)),
+    ));
+}
+
+fn build_map_chunk_image(rgba: &[u8]) -> Image {
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: CHUNK_EDGE as u32,
+            height: CHUNK_EDGE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+fn map_snapshot_pixels(data: &SimChunkData, world_seed: u64) -> Vec<u8> {
+    let edge = CHUNK_EDGE as usize;
+    let mut pixels = Vec::with_capacity(MAP_CHUNK_BYTES);
+
+    for row_y in 0..edge {
+        let ty = edge - 1 - row_y;
+        for tx in 0..edge {
+            let tile = tile_at(data, tx as i32, ty as i32, world_seed);
+            let mut color = if tile == WATER_TILE {
+                let neighbor_is_land =
+                    !is_water(tile_at(data, tx as i32 - 1, ty as i32, world_seed))
+                        || !is_water(tile_at(data, tx as i32 + 1, ty as i32, world_seed))
+                        || !is_water(tile_at(data, tx as i32, ty as i32 - 1, world_seed))
+                        || !is_water(tile_at(data, tx as i32, ty as i32 + 1, world_seed));
+                if neighbor_is_land {
+                    shallow_water_color()
+                } else {
+                    tile_color(tile)
+                }
+            } else {
+                tile_color(tile)
+            };
+            let gx = data.coord.cx * CHUNK_EDGE as i32 + tx as i32;
+            let gy = data.coord.cy * CHUNK_EDGE as i32 + ty as i32;
+            let jitter = tile_jitter(gx, gy, world_seed, tile);
+            color = apply_jitter(color, jitter);
+            let resource = resource_at(data, tx as i32, ty as i32);
+            if resource.kind != RES_NONE && resource.amount > 0 {
+                color = blend_color(color, resource_color(resource.kind), 0.85);
+            }
+            let placed = placed_at(data, tx as i32, ty as i32);
+            if placed.kind != PLACED_NONE {
+                color = blend_color(color, placed_color(placed.kind), 0.9);
+            }
+            pixels.extend_from_slice(&color);
+        }
+    }
+
+    pixels
+}
+
+fn map_unknown_color() -> Color {
+    Color::srgb(0.18, 0.18, 0.2)
 }
 
 const PS_MAGIC: [u8; 4] = *b"PLR1";
@@ -3028,14 +3654,14 @@ fn find_chest<'a>(runtime: &'a WorldRuntime, object_id: ObjectId) -> Option<&'a 
         .find_map(|loaded| loaded.data.chests.iter().find(|c| c.object_id == object_id))
 }
 
-fn find_furnace<'a>(
-    runtime: &'a WorldRuntime,
-    object_id: ObjectId,
-) -> Option<&'a FurnaceRecord> {
-    runtime
-        .loaded
-        .values()
-        .find_map(|loaded| loaded.data.furnaces.iter().find(|f| f.object_id == object_id))
+fn find_furnace<'a>(runtime: &'a WorldRuntime, object_id: ObjectId) -> Option<&'a FurnaceRecord> {
+    runtime.loaded.values().find_map(|loaded| {
+        loaded
+            .data
+            .furnaces
+            .iter()
+            .find(|f| f.object_id == object_id)
+    })
 }
 
 fn with_chest_mut<R>(
@@ -3110,9 +3736,8 @@ fn build_player_image() -> Image {
         filled[y as usize * size + x as usize]
     };
 
-    let is_foot = |x: usize, y: usize| {
-        (y >= 12 && y <= 13) && ((x >= 4 && x <= 6) || (x >= 9 && x <= 11))
-    };
+    let is_foot =
+        |x: usize, y: usize| (y >= 12 && y <= 13) && ((x >= 4 && x <= 6) || (x >= 9 && x <= 11));
 
     let outline_color = [28, 22, 18, 255];
     let body_color = [226, 205, 124, 255];
@@ -3321,7 +3946,12 @@ fn blend_color(base: [u8; 4], overlay: [u8; 4], overlay_weight: f32) -> [u8; 4] 
         let of = o as f32;
         (bf * (1.0 - t) + of * t).round().clamp(0.0, 255.0) as u8
     };
-    [blend(base[0], overlay[0]), blend(base[1], overlay[1]), blend(base[2], overlay[2]), base[3]]
+    [
+        blend(base[0], overlay[0]),
+        blend(base[1], overlay[1]),
+        blend(base[2], overlay[2]),
+        base[3],
+    ]
 }
 
 fn apply_jitter(color: [u8; 4], jitter: i8) -> [u8; 4] {
@@ -3329,7 +3959,12 @@ fn apply_jitter(color: [u8; 4], jitter: i8) -> [u8; 4] {
         let v = value as i16 + jitter as i16;
         v.clamp(0, 255) as u8
     };
-    [adjust(color[0]), adjust(color[1]), adjust(color[2]), color[3]]
+    [
+        adjust(color[0]),
+        adjust(color[1]),
+        adjust(color[2]),
+        color[3],
+    ]
 }
 
 fn tile_jitter(gx: i32, gy: i32, world_seed: u64, tile: TileId) -> i8 {
@@ -3355,14 +3990,10 @@ fn resource_at(data: &SimChunkData, tx: i32, ty: i32) -> ResourceCell {
     let edge = CHUNK_EDGE as i32;
     if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
         let idx = (ty as usize) * (edge as usize) + (tx as usize);
-        return data
-            .resources
-            .get(idx)
-            .copied()
-            .unwrap_or(ResourceCell {
-                kind: RES_NONE,
-                amount: 0,
-            });
+        return data.resources.get(idx).copied().unwrap_or(ResourceCell {
+            kind: RES_NONE,
+            amount: 0,
+        });
     }
     ResourceCell {
         kind: RES_NONE,
@@ -3374,14 +4005,10 @@ fn placed_at(data: &SimChunkData, tx: i32, ty: i32) -> PlacedCell {
     let edge = CHUNK_EDGE as i32;
     if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
         let idx = (ty as usize) * (edge as usize) + (tx as usize);
-        return data
-            .placed
-            .get(idx)
-            .copied()
-            .unwrap_or(PlacedCell {
-                kind: PLACED_NONE,
-                object_id: 0,
-            });
+        return data.placed.get(idx).copied().unwrap_or(PlacedCell {
+            kind: PLACED_NONE,
+            object_id: 0,
+        });
     }
     PlacedCell {
         kind: PLACED_NONE,
@@ -3427,5 +4054,114 @@ fn apply_recovery_report(status: &mut StorageStatus, report: &RecoveryReport) {
             "ignored {} incomplete savepoints",
             report.incomplete_savepoints.len()
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_chunk() -> SimChunkData {
+        SimChunkData {
+            coord: ChunkCoord::new(0, 0),
+            layer: 0,
+            tiles: vec![0; CHUNK_TILE_COUNT],
+            resources: vec![
+                ResourceCell {
+                    kind: RES_NONE,
+                    amount: 0,
+                };
+                CHUNK_TILE_COUNT
+            ],
+            placed: vec![
+                PlacedCell {
+                    kind: PLACED_NONE,
+                    object_id: 0,
+                };
+                CHUNK_TILE_COUNT
+            ],
+            chests: Vec::new(),
+            furnaces: Vec::new(),
+            entities: Vec::new(),
+            saved_tick: 0,
+        }
+    }
+
+    fn local_idx(tx: usize, ty: usize) -> usize {
+        ty * CHUNK_EDGE as usize + tx
+    }
+
+    fn map_pixel(pixels: &[u8], tx: usize, ty: usize) -> [u8; 4] {
+        let edge = CHUNK_EDGE as usize;
+        let row = edge - 1 - ty;
+        let idx = (row * edge + tx) * 4;
+        [
+            pixels[idx],
+            pixels[idx + 1],
+            pixels[idx + 2],
+            pixels[idx + 3],
+        ]
+    }
+
+    fn chunk_pixel(pixels: &[u8], tx: usize, ty: usize) -> [u8; 4] {
+        let edge = CHUNK_EDGE as usize;
+        let padded = edge + 2;
+        let ox = tx + 1;
+        let oy = edge - ty;
+        let idx = (oy * padded + ox) * 4;
+        [
+            pixels[idx],
+            pixels[idx + 1],
+            pixels[idx + 2],
+            pixels[idx + 3],
+        ]
+    }
+
+    #[test]
+    fn map_snapshot_has_one_rgba_pixel_per_tile() {
+        let data = test_chunk();
+        let pixels = map_snapshot_pixels(&data, 7);
+
+        assert_eq!(pixels.len(), MAP_CHUNK_BYTES);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn map_snapshot_includes_resource_overlay() {
+        let mut data = test_chunk();
+        let base = map_snapshot_pixels(&data, 7);
+        data.resources[local_idx(5, 6)] = ResourceCell {
+            kind: RES_IRON,
+            amount: 12,
+        };
+        let with_resource = map_snapshot_pixels(&data, 7);
+
+        assert_ne!(map_pixel(&base, 5, 6), map_pixel(&with_resource, 5, 6));
+    }
+
+    #[test]
+    fn map_snapshot_includes_placed_overlay() {
+        let mut data = test_chunk();
+        let base = map_snapshot_pixels(&data, 7);
+        data.placed[local_idx(8, 9)] = PlacedCell {
+            kind: PLACED_CHEST,
+            object_id: 42,
+        };
+        let with_placed = map_snapshot_pixels(&data, 7);
+
+        assert_ne!(map_pixel(&base, 8, 9), map_pixel(&with_placed, 8, 9));
+    }
+
+    #[test]
+    fn map_snapshot_orientation_matches_chunk_texture_interior() {
+        let data = test_chunk();
+        let config = WorldRenderConfig::default();
+        let map_pixels = map_snapshot_pixels(&data, 7);
+        let chunk_pixels = chunk_pixels(&data, &config, 7, None);
+
+        assert_eq!(
+            map_pixel(&map_pixels, 11, 13),
+            chunk_pixel(&chunk_pixels, 11, 13)
+        );
     }
 }

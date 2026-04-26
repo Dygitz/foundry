@@ -1,7 +1,7 @@
 use persistence::{
-    ChunkCoord, ChunkKey, ChunkLayer, ChunkRecord, ChunkRecordWrite, RecoveryReport, SavepointId,
-    PlayerStateRecord, PlayerStateRecordWrite, StorageError, StorageFuture, WorldId, WorldMeta,
-    WorldStorage,
+    ChunkCoord, ChunkKey, ChunkLayer, ChunkRecord, ChunkRecordWrite, MapChunkRecord,
+    MapChunkRecordWrite, PlayerStateRecord, PlayerStateRecordWrite, RecoveryReport, SavepointId,
+    StorageError, StorageFuture, WorldId, WorldMeta, WorldStorage,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -11,17 +11,18 @@ mod wasm {
     use std::rc::Rc;
     use web_time::{SystemTime, UNIX_EPOCH};
 
+    use idb::request::OpenDatabaseRequest;
     use idb::{
         Database, DatabaseEvent, Event, Factory, KeyPath, ObjectStore, ObjectStoreParams, Query,
         Request, TransactionMode,
     };
-    use idb::request::OpenDatabaseRequest;
     use serde::{Deserialize, Serialize};
     use serde_wasm_bindgen::{from_value, to_value};
     use wasm_bindgen::JsValue;
 
     const STORE_WORLDS: &str = "worlds";
     const STORE_CHUNKS: &str = "chunks";
+    const STORE_MAP_CHUNKS: &str = "map_chunks";
     const STORE_SAVEPOINTS: &str = "savepoints";
     const STORE_PLAYER_STATE: &str = "player_state";
     const INDEX_BY_WORLD: &str = "by_world";
@@ -56,6 +57,17 @@ mod wasm {
         blob: Vec<u8>,
         tick_saved: f64,
         checksum: u32,
+        updated_at_ms: f64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct MapChunkRecordRecord {
+        chunk_key: String,
+        world_id: String,
+        cx: i32,
+        cy: i32,
+        layer: u8,
+        rgba: Vec<u8>,
         updated_at_ms: f64,
     }
 
@@ -193,6 +205,7 @@ mod wasm {
                 let db = self.get_db().await?;
                 // Best-effort delete: concurrent writes may leave residual records.
                 let chunk_keys = fetch_index_keys(&db, STORE_CHUNKS, &world_id).await?;
+                let map_chunk_keys = fetch_index_keys(&db, STORE_MAP_CHUNKS, &world_id).await?;
                 let savepoint_keys = fetch_index_keys(&db, STORE_SAVEPOINTS, &world_id).await?;
 
                 let transaction = db
@@ -200,6 +213,7 @@ mod wasm {
                         &[
                             STORE_WORLDS,
                             STORE_CHUNKS,
+                            STORE_MAP_CHUNKS,
                             STORE_SAVEPOINTS,
                             STORE_PLAYER_STATE,
                         ],
@@ -212,6 +226,9 @@ mod wasm {
                     .map_err(map_idb_error)?;
                 let chunks = transaction
                     .object_store(STORE_CHUNKS)
+                    .map_err(map_idb_error)?;
+                let map_chunks = transaction
+                    .object_store(STORE_MAP_CHUNKS)
                     .map_err(map_idb_error)?;
                 let savepoints = transaction
                     .object_store(STORE_SAVEPOINTS)
@@ -228,6 +245,14 @@ mod wasm {
 
                 for key in chunk_keys {
                     chunks
+                        .delete(key)
+                        .map_err(map_idb_error)?
+                        .await
+                        .map_err(map_idb_error)?;
+                }
+
+                for key in map_chunk_keys {
+                    map_chunks
                         .delete(key)
                         .map_err(map_idb_error)?
                         .await
@@ -350,7 +375,9 @@ mod wasm {
 
                 transaction.await.map_err(map_idb_error)?;
 
-                Ok(value.map(|value| chunk_record_from_js(&value)).transpose()?)
+                Ok(value
+                    .map(|value| chunk_record_from_js(&value))
+                    .transpose()?)
             })
         }
 
@@ -421,6 +448,76 @@ mod wasm {
             })
         }
 
+        fn load_map_chunks(
+            &self,
+            world_id: &WorldId,
+            layer: ChunkLayer,
+        ) -> StorageFuture<'_, Vec<MapChunkRecord>> {
+            let world_id = world_id.clone();
+            Box::pin(async move {
+                let db = self.get_db().await?;
+                let transaction = db
+                    .transaction(&[STORE_MAP_CHUNKS], TransactionMode::ReadOnly)
+                    .map_err(map_idb_error)?;
+                let store = transaction
+                    .object_store(STORE_MAP_CHUNKS)
+                    .map_err(map_idb_error)?;
+                let index = store.index(INDEX_BY_WORLD).map_err(map_idb_error)?;
+                let values = index
+                    .get_all(Some(Query::Key(JsValue::from_str(world_id.as_str()))), None)
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
+
+                transaction.await.map_err(map_idb_error)?;
+
+                let mut records = Vec::with_capacity(values.len());
+                for entry in values {
+                    let record = map_chunk_record_from_js(&entry)?;
+                    if record.key.layer == layer {
+                        records.push(record);
+                    }
+                }
+                Ok(records)
+            })
+        }
+
+        fn put_map_chunks(
+            &self,
+            _world_id: &WorldId,
+            records: Vec<MapChunkRecordWrite>,
+        ) -> StorageFuture<'_, ()> {
+            Box::pin(async move {
+                if records.is_empty() {
+                    return Ok(());
+                }
+
+                let db = self.get_db().await?;
+                let transaction = db
+                    .transaction(&[STORE_MAP_CHUNKS], TransactionMode::ReadWrite)
+                    .map_err(map_idb_error)?;
+                let store = transaction
+                    .object_store(STORE_MAP_CHUNKS)
+                    .map_err(map_idb_error)?;
+
+                for record in records {
+                    let value = map_chunk_record_write_to_js(&record)?;
+                    store
+                        .put(&value, None)
+                        .map_err(map_idb_error)?
+                        .await
+                        .map_err(map_idb_error)?;
+                }
+
+                transaction
+                    .commit()
+                    .map_err(map_idb_error)?
+                    .await
+                    .map_err(map_idb_error)?;
+                Ok(())
+            })
+        }
+
         fn begin_savepoint(
             &self,
             world_id: &WorldId,
@@ -438,12 +535,8 @@ mod wasm {
                     .map_err(map_idb_error)?;
 
                 let created_at_ms = now_ms();
-                let savepoint_id = SavepointId::from(format!(
-                    "{}:{}:{}",
-                    world_id.as_str(),
-                    tick,
-                    created_at_ms
-                ));
+                let savepoint_id =
+                    SavepointId::from(format!("{}:{}:{}", world_id.as_str(), tick, created_at_ms));
                 let value = savepoint_to_js(
                     &savepoint_id,
                     &world_id,
@@ -525,10 +618,7 @@ mod wasm {
                     .map_err(map_idb_error)?;
                 let index = store.index(INDEX_BY_WORLD).map_err(map_idb_error)?;
                 let values = index
-                    .get_all(
-                        Some(Query::Key(JsValue::from_str(world_id.as_str()))),
-                        None,
-                    )
+                    .get_all(Some(Query::Key(JsValue::from_str(world_id.as_str()))), None)
                     .map_err(map_idb_error)?
                     .await
                     .map_err(map_idb_error)?;
@@ -612,11 +702,28 @@ mod wasm {
             STORE_CHUNKS,
             FIELD_CHUNK_KEY,
         )?;
-        ensure_index(&chunks_store, INDEX_BY_WORLD, KeyPath::new_single(FIELD_WORLD_ID))?;
+        ensure_index(
+            &chunks_store,
+            INDEX_BY_WORLD,
+            KeyPath::new_single(FIELD_WORLD_ID),
+        )?;
         ensure_index(
             &chunks_store,
             INDEX_BY_WORLD_COORD,
             KeyPath::new_array([FIELD_WORLD_ID, FIELD_CX, FIELD_CY, FIELD_LAYER]),
+        )?;
+
+        let map_chunks_store = get_or_create_store(
+            database,
+            request,
+            &store_names,
+            STORE_MAP_CHUNKS,
+            FIELD_CHUNK_KEY,
+        )?;
+        ensure_index(
+            &map_chunks_store,
+            INDEX_BY_WORLD,
+            KeyPath::new_single(FIELD_WORLD_ID),
         )?;
 
         let savepoints_store = get_or_create_store(
@@ -626,7 +733,11 @@ mod wasm {
             STORE_SAVEPOINTS,
             FIELD_SAVEPOINT_ID,
         )?;
-        ensure_index(&savepoints_store, INDEX_BY_WORLD, KeyPath::new_single(FIELD_WORLD_ID))?;
+        ensure_index(
+            &savepoints_store,
+            INDEX_BY_WORLD,
+            KeyPath::new_single(FIELD_WORLD_ID),
+        )?;
 
         let _player_state_store = get_or_create_store(
             database,
@@ -650,9 +761,7 @@ mod wasm {
             let transaction = request.transaction().ok_or_else(|| {
                 StorageError::TransactionFailed("upgrade transaction missing".to_string())
             })?;
-            transaction
-                .object_store(store_name)
-                .map_err(map_idb_error)
+            transaction.object_store(store_name).map_err(map_idb_error)
         } else {
             let mut params = ObjectStoreParams::new();
             params.key_path(Some(KeyPath::new_single(key_path)));
@@ -684,13 +793,12 @@ mod wasm {
         let transaction = db
             .transaction(&[store_name], TransactionMode::ReadOnly)
             .map_err(map_idb_error)?;
-        let store = transaction.object_store(store_name).map_err(map_idb_error)?;
+        let store = transaction
+            .object_store(store_name)
+            .map_err(map_idb_error)?;
         let index = store.index(INDEX_BY_WORLD).map_err(map_idb_error)?;
         let keys = index
-            .get_all_keys(
-                Some(Query::Key(JsValue::from_str(world_id.as_str()))),
-                None,
-            )
+            .get_all_keys(Some(Query::Key(JsValue::from_str(world_id.as_str()))), None)
             .map_err(map_idb_error)?
             .await
             .map_err(map_idb_error)?;
@@ -741,7 +849,8 @@ mod wasm {
     }
 
     fn chunk_record_from_js(value: &JsValue) -> Result<ChunkRecord, StorageError> {
-        let record: ChunkRecordRecord = from_value(value.clone()).map_err(map_serde_decode_error)?;
+        let record: ChunkRecordRecord =
+            from_value(value.clone()).map_err(map_serde_decode_error)?;
         let key = ChunkKey::new(
             WorldId::from(record.world_id),
             ChunkCoord {
@@ -755,6 +864,37 @@ mod wasm {
             blob: record.blob,
             tick_saved: f64_to_u64(record.tick_saved, "tick_saved")?,
             checksum: record.checksum,
+            updated_at_ms: f64_to_u64(record.updated_at_ms, "updated_at_ms")?,
+        })
+    }
+
+    fn map_chunk_record_write_to_js(record: &MapChunkRecordWrite) -> Result<JsValue, StorageError> {
+        let record = MapChunkRecordRecord {
+            chunk_key: record.key.to_key_string(),
+            world_id: record.key.world_id.as_str().to_string(),
+            cx: record.key.coord.cx,
+            cy: record.key.coord.cy,
+            layer: record.key.layer,
+            rgba: record.rgba.clone(),
+            updated_at_ms: u64_to_f64(record.updated_at_ms),
+        };
+        to_value(&record).map_err(map_serde_encode_error)
+    }
+
+    fn map_chunk_record_from_js(value: &JsValue) -> Result<MapChunkRecord, StorageError> {
+        let record: MapChunkRecordRecord =
+            from_value(value.clone()).map_err(map_serde_decode_error)?;
+        let key = ChunkKey::new(
+            WorldId::from(record.world_id),
+            ChunkCoord {
+                cx: record.cx,
+                cy: record.cy,
+            },
+            record.layer,
+        );
+        Ok(MapChunkRecord {
+            key,
+            rgba: record.rgba,
             updated_at_ms: f64_to_u64(record.updated_at_ms, "updated_at_ms")?,
         })
     }
@@ -848,9 +988,7 @@ mod wasm {
     }
 
     fn js_value_to_string(value: &JsValue) -> String {
-        value
-            .as_string()
-            .unwrap_or_else(|| format!("{value:?}"))
+        value.as_string().unwrap_or_else(|| format!("{value:?}"))
     }
 }
 
@@ -916,7 +1054,10 @@ impl WorldStorage for IndexedDbStorage {
         })
     }
 
-    fn load_player_state(&self, _world_id: &WorldId) -> StorageFuture<'_, Option<PlayerStateRecord>> {
+    fn load_player_state(
+        &self,
+        _world_id: &WorldId,
+    ) -> StorageFuture<'_, Option<PlayerStateRecord>> {
         Box::pin(async move {
             Err(StorageError::InitFailed(
                 "IndexedDB is only available for wasm32 targets".to_string(),
@@ -958,6 +1099,30 @@ impl WorldStorage for IndexedDbStorage {
     }
 
     fn delete_chunks(&self, _world_id: &WorldId, _keys: Vec<ChunkKey>) -> StorageFuture<'_, ()> {
+        Box::pin(async move {
+            Err(StorageError::InitFailed(
+                "IndexedDB is only available for wasm32 targets".to_string(),
+            ))
+        })
+    }
+
+    fn load_map_chunks(
+        &self,
+        _world_id: &WorldId,
+        _layer: ChunkLayer,
+    ) -> StorageFuture<'_, Vec<MapChunkRecord>> {
+        Box::pin(async move {
+            Err(StorageError::InitFailed(
+                "IndexedDB is only available for wasm32 targets".to_string(),
+            ))
+        })
+    }
+
+    fn put_map_chunks(
+        &self,
+        _world_id: &WorldId,
+        _records: Vec<MapChunkRecordWrite>,
+    ) -> StorageFuture<'_, ()> {
         Box::pin(async move {
             Err(StorageError::InitFailed(
                 "IndexedDB is only available for wasm32 targets".to_string(),

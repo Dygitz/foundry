@@ -87,6 +87,20 @@ pub struct ChunkRecordWrite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapChunkRecord {
+    pub key: ChunkKey,
+    pub rgba: Vec<u8>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapChunkRecordWrite {
+    pub key: ChunkKey,
+    pub rgba: Vec<u8>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerStateRecord {
     pub world_id: WorldId,
     pub blob: Vec<u8>,
