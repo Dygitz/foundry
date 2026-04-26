@@ -461,38 +461,64 @@ pub(crate) fn spawn_map_chunk_nodes(
     center_tile: Vec2,
     px_per_tile: f32,
     viewport: Vec2,
-    snap_to_pixels: bool,
+    use_minimap_seam_bleed: bool,
 ) {
     let chunk_tiles = CHUNK_EDGE as f32;
     let chunk_px = chunk_tiles * px_per_tile;
+    let mut draw_nodes = Vec::new();
+
     for (key, chunk) in &map.explored {
         let min_x = key.coord.cx as f32 * chunk_tiles;
         let max_y = (key.coord.cy as f32 + 1.0) * chunk_tiles;
         let mut left = viewport.x * 0.5 + (min_x - center_tile.x) * px_per_tile;
         let mut top = viewport.y * 0.5 - (max_y - center_tile.y) * px_per_tile;
         let mut size = chunk_px;
-        if snap_to_pixels {
+        if use_minimap_seam_bleed {
             left = left.round();
             top = top.round();
-            size = chunk_px.round();
+            size = chunk_px.round() + 1.0;
         }
 
         if left > viewport.x || top > viewport.y || left + size < 0.0 || top + size < 0.0 {
             continue;
         }
 
+        draw_nodes.push(MapChunkDrawNode {
+            left,
+            top,
+            size,
+            rect: map_chunk_source_rect(use_minimap_seam_bleed),
+            image: chunk.image.clone(),
+        });
+    }
+
+    draw_nodes.sort_by(|a, b| {
+        a.top
+            .total_cmp(&b.top)
+            .then_with(|| a.left.total_cmp(&b.left))
+    });
+
+    for draw_node in draw_nodes {
         parent.spawn((
-            ImageNode::new(chunk.image.clone()),
+            ImageNode::new(draw_node.image).with_rect(draw_node.rect),
             Node {
-                width: Val::Px(size),
-                height: Val::Px(size),
+                width: Val::Px(draw_node.size),
+                height: Val::Px(draw_node.size),
                 position_type: PositionType::Absolute,
-                left: Val::Px(left),
-                top: Val::Px(top),
+                left: Val::Px(draw_node.left),
+                top: Val::Px(draw_node.top),
                 ..default()
             },
         ));
     }
+}
+
+struct MapChunkDrawNode {
+    left: f32,
+    top: f32,
+    size: f32,
+    rect: Rect,
+    image: Handle<Image>,
 }
 
 pub(crate) fn spawn_map_player_marker(
@@ -679,19 +705,50 @@ pub(crate) fn resource_display_name(kind: ResourceId) -> &'static str {
 }
 
 pub(crate) fn build_map_chunk_image(rgba: &[u8]) -> Image {
+    let pixels = padded_map_chunk_pixels(rgba);
+    let padded_edge = CHUNK_EDGE as u32 + 2;
     let mut image = Image::new_fill(
         Extent3d {
-            width: CHUNK_EDGE as u32,
-            height: CHUNK_EDGE as u32,
+            width: padded_edge,
+            height: padded_edge,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        rgba,
+        &pixels,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::all(),
     );
     image.sampler = ImageSampler::nearest();
     image
+}
+
+pub(crate) fn padded_map_chunk_pixels(rgba: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgba.len(), MAP_CHUNK_BYTES);
+
+    let edge = CHUNK_EDGE as usize;
+    let padded_edge = edge + 2;
+    let mut pixels = Vec::with_capacity(padded_edge * padded_edge * 4);
+
+    for y in 0..padded_edge {
+        let src_y = y.saturating_sub(1).min(edge - 1);
+        for x in 0..padded_edge {
+            let src_x = x.saturating_sub(1).min(edge - 1);
+            let idx = (src_y * edge + src_x) * 4;
+            pixels.extend_from_slice(&rgba[idx..idx + 4]);
+        }
+    }
+
+    pixels
+}
+
+pub(crate) fn map_chunk_source_rect(use_minimap_seam_bleed: bool) -> Rect {
+    let edge = CHUNK_EDGE as f32;
+    let max = if use_minimap_seam_bleed {
+        edge + 2.0
+    } else {
+        edge + 1.0
+    };
+    Rect::from_corners(Vec2::new(1.0, 1.0), Vec2::new(max, max))
 }
 
 pub(crate) fn map_snapshot_pixels(data: &SimChunkData, world_seed: u64) -> Vec<u8> {

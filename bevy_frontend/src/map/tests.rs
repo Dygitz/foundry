@@ -42,6 +42,28 @@ fn map_pixel(pixels: &[u8], tx: usize, ty: usize) -> [u8; 4] {
     ]
 }
 
+fn raw_pixel(pixels: &[u8], x: usize, y: usize) -> [u8; 4] {
+    let edge = CHUNK_EDGE as usize;
+    let idx = (y * edge + x) * 4;
+    [
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    ]
+}
+
+fn padded_map_pixel(pixels: &[u8], x: usize, y: usize) -> [u8; 4] {
+    let padded_edge = CHUNK_EDGE as usize + 2;
+    let idx = (y * padded_edge + x) * 4;
+    [
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    ]
+}
+
 fn chunk_pixel(pixels: &[u8], tx: usize, ty: usize) -> [u8; 4] {
     let edge = CHUNK_EDGE as usize;
     let padded = edge + 2;
@@ -73,6 +95,70 @@ fn map_snapshot_has_one_rgba_pixel_per_tile() {
 
     assert_eq!(pixels.len(), MAP_CHUNK_BYTES);
     assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+}
+
+#[test]
+fn padded_map_chunk_pixels_duplicate_all_edges() {
+    let edge = CHUNK_EDGE as usize;
+    let padded_edge = edge + 2;
+    let mut rgba = Vec::with_capacity(MAP_CHUNK_BYTES);
+    for y in 0..edge {
+        for x in 0..edge {
+            rgba.extend_from_slice(&[x as u8, y as u8, (x + y) as u8, 255]);
+        }
+    }
+
+    let padded = padded_map_chunk_pixels(&rgba);
+
+    assert_eq!(padded.len(), padded_edge * padded_edge * 4);
+    for y in 0..edge {
+        for x in 0..edge {
+            assert_eq!(
+                padded_map_pixel(&padded, x + 1, y + 1),
+                raw_pixel(&rgba, x, y)
+            );
+        }
+    }
+    for x in 0..edge {
+        assert_eq!(padded_map_pixel(&padded, x + 1, 0), raw_pixel(&rgba, x, 0));
+        assert_eq!(
+            padded_map_pixel(&padded, x + 1, padded_edge - 1),
+            raw_pixel(&rgba, x, edge - 1)
+        );
+    }
+    for y in 0..edge {
+        assert_eq!(padded_map_pixel(&padded, 0, y + 1), raw_pixel(&rgba, 0, y));
+        assert_eq!(
+            padded_map_pixel(&padded, padded_edge - 1, y + 1),
+            raw_pixel(&rgba, edge - 1, y)
+        );
+    }
+    assert_eq!(padded_map_pixel(&padded, 0, 0), raw_pixel(&rgba, 0, 0));
+    assert_eq!(
+        padded_map_pixel(&padded, padded_edge - 1, 0),
+        raw_pixel(&rgba, edge - 1, 0)
+    );
+    assert_eq!(
+        padded_map_pixel(&padded, 0, padded_edge - 1),
+        raw_pixel(&rgba, 0, edge - 1)
+    );
+    assert_eq!(
+        padded_map_pixel(&padded, padded_edge - 1, padded_edge - 1),
+        raw_pixel(&rgba, edge - 1, edge - 1)
+    );
+}
+
+#[test]
+fn map_chunk_source_rects_select_interior_and_minimap_bleed() {
+    let edge = CHUNK_EDGE as f32;
+
+    let normal = map_chunk_source_rect(false);
+    assert_eq!(normal.min, Vec2::new(1.0, 1.0));
+    assert_eq!(normal.max, Vec2::new(edge + 1.0, edge + 1.0));
+
+    let minimap = map_chunk_source_rect(true);
+    assert_eq!(minimap.min, Vec2::new(1.0, 1.0));
+    assert_eq!(minimap.max, Vec2::new(edge + 2.0, edge + 2.0));
 }
 
 #[test]
