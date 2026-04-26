@@ -23,6 +23,7 @@ impl Plugin for FoundryUiPlugin {
                     hotbar_button_system,
                     hotbar_ui_system,
                     craft_menu_text_system,
+                    mining_feedback_ui_system,
                     inventory_cell_hover_system,
                     crafting_recipe_button_system,
                     crafting_panel_text_system,
@@ -202,6 +203,7 @@ pub(crate) fn spawn_game_hud(commands: &mut Commands, icons: &UiIconAssets) {
         })
         .with_children(|root| {
             spawn_action_prompt(root, icons.crafting.clone(), "Crafting", "[E]");
+            spawn_mining_feedback_panel(root);
         });
 
     spawn_hotbar(commands, icons);
@@ -410,6 +412,72 @@ pub(crate) fn spawn_hotbar(commands: &mut Commands, icons: &UiIconAssets) {
                     ));
                 });
             }
+        });
+}
+
+pub(crate) fn spawn_mining_feedback_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            Visibility::Hidden,
+            MiningFeedbackPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.94, 0.9)),
+                hud_text_shadow(),
+                MiningInstructionText,
+            ));
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(18.0),
+                        position_type: PositionType::Relative,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.03, 0.02, 0.72)),
+                    BorderRadius::all(Val::Px(9.0)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Percent(0.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.25, 0.78, 0.3)),
+                        BorderRadius::all(Val::Px(9.0)),
+                        MiningProgressFill,
+                    ));
+                });
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.94, 0.94, 0.9, 0.82)),
+                hud_text_shadow(),
+                MiningProgressText,
+            ));
         });
 }
 
@@ -1306,6 +1374,83 @@ pub(crate) fn craft_menu_text_system(
     };
     for mut text in &mut query {
         *text = Text::new(label.to_string());
+    }
+}
+
+pub(crate) fn mining_feedback_ui_system(
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
+    map: Res<MapState>,
+    ui_state: Res<UiState>,
+    mut mining_feedback: ResMut<MiningFeedbackState>,
+    mut panel_query: Query<&mut Visibility, With<MiningFeedbackPanel>>,
+    mut text_queries: ParamSet<(
+        Query<&mut Text, With<MiningInstructionText>>,
+        Query<&mut Text, With<MiningProgressText>>,
+    )>,
+    mut bar_query: Query<&mut Node, With<MiningProgressFill>>,
+) {
+    let mut target = None;
+    if ui_state.mode == UiMode::None {
+        if let (Ok(window), Ok((camera, camera_transform))) =
+            (windows.single(), camera_query.single())
+        {
+            if let Some(cursor_pos) = window.cursor_position() {
+                if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) {
+                    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
+                    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
+                    if let Some(resource) =
+                        map_resource_at(&map, &session, config.layer, tile_x, tile_y)
+                    {
+                        target = Some((tile_x, tile_y, resource));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut instruction = String::new();
+    let mut details = String::new();
+    let mut ratio = 0.0f32;
+
+    if let Some((tile_x, tile_y, resource)) = target {
+        for mut visibility in &mut panel_query {
+            *visibility = Visibility::Visible;
+        }
+        if mining_feedback.tracked_tile != Some((tile_x, tile_y))
+            || mining_feedback.tracked_resource_kind != resource.kind
+        {
+            mining_feedback.tracked_tile = Some((tile_x, tile_y));
+            mining_feedback.tracked_resource_kind = resource.kind;
+            mining_feedback.tracked_max_amount = resource.amount;
+        } else {
+            mining_feedback.tracked_max_amount =
+                mining_feedback.tracked_max_amount.max(resource.amount);
+        }
+        let max_amount = mining_feedback.tracked_max_amount.max(1);
+        ratio = (resource.amount as f32 / max_amount as f32).clamp(0.0, 1.0);
+        let resource_name = resource_display_name(resource.kind);
+        instruction = format!("Mining {resource_name}");
+        details = format!("{resource_name} left: {}/{}", resource.amount, max_amount);
+    } else {
+        for mut visibility in &mut panel_query {
+            *visibility = Visibility::Hidden;
+        }
+        mining_feedback.tracked_tile = None;
+        mining_feedback.tracked_resource_kind = RES_NONE;
+        mining_feedback.tracked_max_amount = 0;
+    }
+
+    for mut text in &mut text_queries.p0() {
+        *text = Text::new(instruction.clone());
+    }
+    for mut node in &mut bar_query {
+        node.width = Val::Percent(ratio * 100.0);
+    }
+    for mut text in &mut text_queries.p1() {
+        *text = Text::new(details.clone());
     }
 }
 

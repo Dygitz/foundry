@@ -498,6 +498,13 @@ pub(crate) struct ClickHighlight {
     pub(crate) tile: Option<(i32, i32)>,
 }
 
+#[derive(Resource, Default)]
+pub(crate) struct MiningFeedbackState {
+    pub(crate) tracked_tile: Option<(i32, i32)>,
+    pub(crate) tracked_resource_kind: ResourceId,
+    pub(crate) tracked_max_amount: u16,
+}
+
 #[derive(Resource)]
 pub(crate) struct DebugConfig {
     pub(crate) log_mining: bool,

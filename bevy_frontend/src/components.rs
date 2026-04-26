@@ -168,6 +168,18 @@ pub(crate) struct FurnaceDepositCountText {
 pub(crate) struct FurnaceProgressBar;
 
 #[derive(Component)]
+pub(crate) struct MiningFeedbackPanel;
+
+#[derive(Component)]
+pub(crate) struct MiningInstructionText;
+
+#[derive(Component)]
+pub(crate) struct MiningProgressFill;
+
+#[derive(Component)]
+pub(crate) struct MiningProgressText;
+
+#[derive(Component)]
 pub(crate) struct Player;
 
 #[derive(Component, Copy, Clone)]

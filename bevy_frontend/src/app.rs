@@ -57,6 +57,7 @@ impl Plugin for FoundryCorePlugin {
             .insert_resource(UiState::default())
             .insert_resource(CraftingUiState::default())
             .insert_resource(ClickHighlight::default())
+            .insert_resource(MiningFeedbackState::default())
             .insert_resource(DebugConfig::default())
             .insert_resource(EvictionStats::default())
             .insert_resource(AutosaveState::default())
