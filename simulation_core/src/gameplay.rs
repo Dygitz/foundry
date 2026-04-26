@@ -1,7 +1,8 @@
 use crate::{
-    ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE, ITEM_IRON_ORE,
-    ITEM_IRON_PLATE, ITEM_STONE, Inventory, ItemId, ObjectId, PLACED_CHEST, PLACED_FURNACE,
-    PlacedId, RES_COAL, RES_COPPER, RES_IRON, RES_STONE, ResourceId, mix64,
+    ITEM_CHEST, ITEM_COAL, ITEM_COPPER_ORE, ITEM_COPPER_PLATE, ITEM_FURNACE, ITEM_INSERTER,
+    ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_STONE, Inventory, ItemId, ObjectId, PLACED_CHEST,
+    PLACED_FURNACE, PLACED_INSERTER, PlacedId, RES_COAL, RES_COPPER, RES_IRON, RES_STONE,
+    ResourceId, mix64,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -11,7 +12,7 @@ pub struct Recipe {
     pub inputs: &'static [(ItemId, u32)],
 }
 
-pub const INVENTORY_ITEMS: [ItemId; 8] = [
+pub const INVENTORY_ITEMS: [ItemId; 9] = [
     ITEM_STONE,
     ITEM_COPPER_ORE,
     ITEM_COAL,
@@ -20,9 +21,10 @@ pub const INVENTORY_ITEMS: [ItemId; 8] = [
     ITEM_COPPER_PLATE,
     ITEM_FURNACE,
     ITEM_CHEST,
+    ITEM_INSERTER,
 ];
 
-pub const PLACEABLE_ITEMS: [ItemId; 2] = [ITEM_FURNACE, ITEM_CHEST];
+pub const PLACEABLE_ITEMS: [ItemId; 3] = [ITEM_FURNACE, ITEM_CHEST, ITEM_INSERTER];
 
 pub const RECIPE_FURNACE: Recipe = Recipe {
     output: ITEM_FURNACE,
@@ -36,7 +38,13 @@ pub const RECIPE_CHEST: Recipe = Recipe {
     inputs: &[(ITEM_STONE, 10)],
 };
 
-pub const RECIPES: [&Recipe; 2] = [&RECIPE_FURNACE, &RECIPE_CHEST];
+pub const RECIPE_INSERTER: Recipe = Recipe {
+    output: ITEM_INSERTER,
+    output_amount: 1,
+    inputs: &[(ITEM_IRON_PLATE, 2), (ITEM_COPPER_PLATE, 1)],
+};
+
+pub const RECIPES: [&Recipe; 3] = [&RECIPE_FURNACE, &RECIPE_CHEST, &RECIPE_INSERTER];
 
 pub const FURNACE_PROGRESS_PER_ITEM: u16 = 1000;
 pub const FURNACE_SECONDS_PER_ITEM: f32 = 2.0;
@@ -97,6 +105,7 @@ pub fn item_name(item: ItemId) -> &'static str {
         ITEM_COPPER_PLATE => "Copper Plate",
         ITEM_FURNACE => "Furnace",
         ITEM_CHEST => "Chest",
+        ITEM_INSERTER => "Inserter",
         _ => "Unknown",
     }
 }
@@ -105,6 +114,16 @@ pub fn item_to_placed_kind(item: ItemId) -> Option<PlacedId> {
     match item {
         ITEM_FURNACE => Some(PLACED_FURNACE),
         ITEM_CHEST => Some(PLACED_CHEST),
+        ITEM_INSERTER => Some(PLACED_INSERTER),
+        _ => None,
+    }
+}
+
+pub fn placed_kind_to_item(kind: PlacedId) -> Option<ItemId> {
+    match kind {
+        PLACED_FURNACE => Some(ITEM_FURNACE),
+        PLACED_CHEST => Some(ITEM_CHEST),
+        PLACED_INSERTER => Some(ITEM_INSERTER),
         _ => None,
     }
 }

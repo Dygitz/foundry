@@ -345,9 +345,51 @@ pub(crate) struct PlayerState {
     pub(crate) inventory: Inventory,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(crate) struct PlacementState {
     pub(crate) selected: Option<ItemId>,
+    pub(crate) inserter_direction: InserterDirection,
+}
+
+impl Default for PlacementState {
+    fn default() -> Self {
+        Self {
+            selected: None,
+            inserter_direction: InserterDirection::default(),
+        }
+    }
+}
+
+pub(crate) const STRUCTURE_PICKUP_SECONDS: f32 = 1.25;
+
+#[derive(Resource, Default)]
+pub(crate) struct StructurePickupState {
+    pub(crate) target: Option<StructurePickupTarget>,
+    pub(crate) elapsed_secs: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StructurePickupTarget {
+    pub(crate) key: ChunkKey,
+    pub(crate) tile_x: i32,
+    pub(crate) tile_y: i32,
+    pub(crate) local_x: i32,
+    pub(crate) local_y: i32,
+    pub(crate) kind: PlacedId,
+    pub(crate) object_id: ObjectId,
+}
+
+#[derive(Resource)]
+pub(crate) struct InserterState {
+    pub(crate) timer: Timer,
+}
+
+impl Default for InserterState {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+        }
+    }
 }
 
 pub(crate) const HOTBAR_SLOT_COUNT: usize = 10;
@@ -411,6 +453,7 @@ pub(crate) struct UiIconAssets {
     pub(crate) copper_plate: Handle<Image>,
     pub(crate) furnace: Handle<Image>,
     pub(crate) chest: Handle<Image>,
+    pub(crate) inserter: Handle<Image>,
     pub(crate) crafting: Handle<Image>,
 }
 
@@ -425,6 +468,7 @@ impl UiIconAssets {
             ITEM_COPPER_PLATE => self.copper_plate.clone(),
             ITEM_FURNACE => self.furnace.clone(),
             ITEM_CHEST => self.chest.clone(),
+            ITEM_INSERTER => self.inserter.clone(),
             _ => self.empty.clone(),
         }
     }
@@ -442,6 +486,7 @@ pub(crate) enum UiMode {
     Crafting,
     Chest { object_id: ObjectId },
     Furnace { object_id: ObjectId },
+    Inserter { object_id: ObjectId },
 }
 
 impl Default for UiMode {

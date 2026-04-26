@@ -24,6 +24,8 @@ impl Plugin for FoundryUiPlugin {
                     hotbar_ui_system,
                     craft_menu_text_system,
                     mining_feedback_ui_system,
+                    structure_pickup_feedback_ui_system,
+                    placement_direction_ui_system,
                     inventory_cell_hover_system,
                     crafting_recipe_button_system,
                     crafting_panel_text_system,
@@ -32,6 +34,7 @@ impl Plugin for FoundryUiPlugin {
                     pickup_notice_lifetime_system,
                     chest_ui_system,
                     furnace_ui_system,
+                    inserter_ui_system,
                 )
                     .in_set(UpdateSet::Ui),
             )
@@ -155,6 +158,7 @@ pub(crate) fn build_ui_icon_assets(images: &mut Assets<Image>) -> UiIconAssets {
         copper_plate: images.add(build_hud_icon_image(HudIconKind::CopperPlate)),
         furnace: images.add(build_hud_icon_image(HudIconKind::Furnace)),
         chest: images.add(build_hud_icon_image(HudIconKind::Chest)),
+        inserter: images.add(build_hud_icon_image(HudIconKind::Inserter)),
         crafting: images.add(build_hud_icon_image(HudIconKind::Anvil)),
     }
 }
@@ -203,6 +207,8 @@ pub(crate) fn spawn_game_hud(commands: &mut Commands, icons: &UiIconAssets) {
         })
         .with_children(|root| {
             spawn_action_prompt(root, icons.crafting.clone(), "Crafting", "[E]");
+            spawn_placement_direction_panel(root);
+            spawn_pickup_feedback_panel(root);
             spawn_mining_feedback_panel(root);
         });
 
@@ -477,6 +483,104 @@ pub(crate) fn spawn_mining_feedback_panel(parent: &mut ChildSpawnerCommands) {
                 TextColor(Color::srgba(0.94, 0.94, 0.9, 0.82)),
                 hud_text_shadow(),
                 MiningProgressText,
+            ));
+        });
+}
+
+pub(crate) fn spawn_pickup_feedback_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            Visibility::Hidden,
+            PickupFeedbackPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.91, 0.78)),
+                hud_text_shadow(),
+                PickupInstructionText,
+            ));
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(18.0),
+                        position_type: PositionType::Relative,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.03, 0.02, 0.72)),
+                    BorderRadius::all(Val::Px(9.0)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Percent(0.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.86, 0.58, 0.18)),
+                        BorderRadius::all(Val::Px(9.0)),
+                        PickupProgressFill,
+                    ));
+                });
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.94, 0.94, 0.9, 0.82)),
+                hud_text_shadow(),
+                PickupProgressText,
+            ));
+        });
+}
+
+pub(crate) fn spawn_placement_direction_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            Visibility::Hidden,
+            PlacementDirectionPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.96, 0.85, 0.56)),
+                hud_text_shadow(),
+                PlacementDirectionText,
             ));
         });
 }
@@ -1133,6 +1237,119 @@ pub(crate) fn spawn_furnace_deposit_cell(
         });
 }
 
+pub(crate) fn spawn_inserter_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(342.0),
+                max_width: Val::Percent(92.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            InserterPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Inserter"),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
+            ));
+            panel.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.94, 0.9, 0.74, 0.92)),
+                hud_text_shadow(),
+                InserterDirectionText,
+            ));
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|section| {
+                    spawn_panel_section_label(section, "Buffer");
+                    section
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            for index in 0..INSERTER_SLOT_COUNT {
+                                spawn_inserter_slot_cell(row, icons, index);
+                            }
+                        });
+                });
+        });
+}
+
+pub(crate) fn spawn_inserter_slot_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    index: usize,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            InserterSlotButton { index },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.empty.clone()),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                InserterSlotIcon { index },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                InserterSlotCountText { index },
+            ));
+        });
+}
+
 pub(crate) fn spawn_panel_section_label(parent: &mut ChildSpawnerCommands, label: &'static str) {
     parent.spawn((
         Text::new(label),
@@ -1168,6 +1385,10 @@ pub(crate) fn item_count_label(count: u32) -> String {
     } else {
         count.to_string()
     }
+}
+
+pub(crate) fn inserter_direction_label(direction: InserterDirection) -> String {
+    format!("{} {}", direction.label(), direction.arrow())
 }
 
 pub(crate) fn furnace_slot(furnace: Option<&FurnaceRecord>, slot: FurnaceSlot) -> Option<Slot> {
@@ -1260,6 +1481,12 @@ pub(crate) fn ui_visibility_system(
             commands
                 .entity(panel_entity)
                 .with_children(|parent| spawn_furnace_panel(parent, &icons));
+        }
+        UiMode::Inserter { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_inserter_panel(parent, &icons));
         }
     }
 }
@@ -1384,6 +1611,7 @@ pub(crate) fn mining_feedback_ui_system(
     session: Res<WorldSession>,
     map: Res<MapState>,
     ui_state: Res<UiState>,
+    pickup_state: Res<StructurePickupState>,
     mut mining_feedback: ResMut<MiningFeedbackState>,
     mut panel_query: Query<&mut Visibility, With<MiningFeedbackPanel>>,
     mut text_queries: ParamSet<(
@@ -1393,7 +1621,7 @@ pub(crate) fn mining_feedback_ui_system(
     mut bar_query: Query<&mut Node, With<MiningProgressFill>>,
 ) {
     let mut target = None;
-    if ui_state.mode == UiMode::None {
+    if ui_state.mode == UiMode::None && pickup_state.target.is_none() {
         if let (Ok(window), Ok((camera, camera_transform))) =
             (windows.single(), camera_query.single())
         {
@@ -1451,6 +1679,69 @@ pub(crate) fn mining_feedback_ui_system(
     }
     for mut text in &mut text_queries.p1() {
         *text = Text::new(details.clone());
+    }
+}
+
+pub(crate) fn structure_pickup_feedback_ui_system(
+    pickup_state: Res<StructurePickupState>,
+    mut panel_query: Query<&mut Visibility, With<PickupFeedbackPanel>>,
+    mut text_queries: ParamSet<(
+        Query<&mut Text, With<PickupInstructionText>>,
+        Query<&mut Text, With<PickupProgressText>>,
+    )>,
+    mut bar_query: Query<&mut Node, With<PickupProgressFill>>,
+) {
+    let Some(target) = pickup_state.target.as_ref() else {
+        for mut visibility in &mut panel_query {
+            *visibility = Visibility::Hidden;
+        }
+        for mut node in &mut bar_query {
+            node.width = Val::Percent(0.0);
+        }
+        return;
+    };
+
+    for mut visibility in &mut panel_query {
+        *visibility = Visibility::Visible;
+    }
+
+    let item = placed_kind_to_item(target.kind).unwrap_or(ITEM_NONE);
+    let label = format!("Picking up {}", item_name(item));
+    let ratio = (pickup_state.elapsed_secs / STRUCTURE_PICKUP_SECONDS).clamp(0.0, 1.0);
+    let remaining = (STRUCTURE_PICKUP_SECONDS - pickup_state.elapsed_secs).max(0.0);
+    let details = format!("Hold right click: {:.1}s", remaining);
+
+    for mut text in &mut text_queries.p0() {
+        *text = Text::new(label.clone());
+    }
+    for mut node in &mut bar_query {
+        node.width = Val::Percent(ratio * 100.0);
+    }
+    for mut text in &mut text_queries.p1() {
+        *text = Text::new(details.clone());
+    }
+}
+
+pub(crate) fn placement_direction_ui_system(
+    placement: Res<PlacementState>,
+    mut panel_query: Query<&mut Visibility, With<PlacementDirectionPanel>>,
+    mut text_query: Query<&mut Text, With<PlacementDirectionText>>,
+) {
+    let is_visible = placement.selected == Some(ITEM_INSERTER);
+    for mut visibility in &mut panel_query {
+        *visibility = if is_visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if !is_visible {
+        return;
+    }
+
+    let label = inserter_direction_label(placement.inserter_direction);
+    for mut text in &mut text_query {
+        *text = Text::new(format!("Inserter output: {label}"));
     }
 }
 
@@ -1842,6 +2133,67 @@ pub(crate) fn furnace_ui_system(
         .unwrap_or(0.0);
     for mut node in &mut bar_query {
         node.width = Val::Px(width);
+    }
+}
+
+pub(crate) fn inserter_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<(
+        &InserterSlotButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut slot_icons: Query<(&InserterSlotIcon, &mut ImageNode)>,
+    mut text_queries: ParamSet<(
+        Query<(&InserterSlotCountText, &mut Text)>,
+        Query<&mut Text, With<InserterDirectionText>>,
+    )>,
+) {
+    let UiMode::Inserter { object_id } = ui_state.mode else {
+        return;
+    };
+    let inserter = find_inserter(&runtime, object_id);
+
+    let direction_label = inserter
+        .map(|inserter| inserter_direction_label(inserter.direction))
+        .unwrap_or_else(|| "Missing".to_string());
+    for mut text in &mut text_queries.p1() {
+        *text = Text::new(format!("Output: {direction_label}"));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = inserter
+            .and_then(|inserter| inserter.inv.slots.get(button.index))
+            .copied();
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        let slot = inserter
+            .and_then(|inserter| inserter.inv.slots.get(slot_icon.index))
+            .copied();
+        if let Some(slot) = slot.filter(|slot| !slot.is_empty()) {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut text_queries.p0() {
+        let count = inserter
+            .and_then(|inserter| inserter.inv.slots.get(slot_count.index))
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
     }
 }
 

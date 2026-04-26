@@ -53,6 +53,8 @@ impl Plugin for FoundryCorePlugin {
             .insert_resource(PlayerStateSaveState::default())
             .insert_resource(PlayerStateLoadState::default())
             .insert_resource(PlacementState::default())
+            .insert_resource(StructurePickupState::default())
+            .insert_resource(InserterState::default())
             .insert_resource(HotbarState::default())
             .insert_resource(UiState::default())
             .insert_resource(CraftingUiState::default())

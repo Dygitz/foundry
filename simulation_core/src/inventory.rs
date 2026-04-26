@@ -11,6 +11,7 @@ pub const ITEM_IRON_PLATE: ItemId = 5;
 pub const ITEM_COPPER_PLATE: ItemId = 6;
 pub const ITEM_FURNACE: ItemId = 7;
 pub const ITEM_CHEST: ItemId = 8;
+pub const ITEM_INSERTER: ItemId = 9;
 
 #[derive(Debug, Clone, Default)]
 pub struct Inventory {

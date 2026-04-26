@@ -111,6 +111,11 @@ pub(crate) fn open_panel_for_tile(
             object_id: cell.object_id,
         });
     }
+    if cell.kind == PLACED_INSERTER && cell.object_id != 0 {
+        return Some(UiMode::Inserter {
+            object_id: cell.object_id,
+        });
+    }
     None
 }
 
@@ -134,6 +139,19 @@ pub(crate) fn find_furnace<'a>(
             .furnaces
             .iter()
             .find(|f| f.object_id == object_id)
+    })
+}
+
+pub(crate) fn find_inserter<'a>(
+    runtime: &'a WorldRuntime,
+    object_id: ObjectId,
+) -> Option<&'a InserterRecord> {
+    runtime.loaded.values().find_map(|loaded| {
+        loaded
+            .data
+            .inserters
+            .iter()
+            .find(|i| i.object_id == object_id)
     })
 }
 
@@ -168,6 +186,26 @@ pub(crate) fn with_furnace_mut<R>(
             .furnaces
             .iter()
             .any(|furnace| furnace.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+pub(crate) fn with_inserter_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .inserters
+            .iter()
+            .any(|inserter| inserter.object_id == object_id)
         {
             let result = f(&mut loaded.data);
             let snapshot = loaded.data.clone();

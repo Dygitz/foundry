@@ -47,3 +47,34 @@ fn furnace_input_and_fuel_are_separate_slots() {
     assert_eq!(furnaces[0].state.fuel.item, ITEM_COAL);
     assert_eq!(furnaces[0].state.fuel.count, 1);
 }
+
+#[test]
+fn inserter_deposit_uses_small_internal_buffer() {
+    let mut inserters = [InserterRecord {
+        object_id: 11,
+        direction: InserterDirection::default(),
+        inv: InserterInv::default(),
+    }];
+
+    assert_eq!(deposit_to_inserter(&mut inserters, 11, ITEM_STONE, 1), 1);
+    assert_eq!(deposit_to_inserter(&mut inserters, 11, ITEM_COAL, 1), 1);
+
+    assert_eq!(inserters[0].inv.slots[0].item, ITEM_STONE);
+    assert_eq!(inserters[0].inv.slots[1].item, ITEM_COAL);
+}
+
+#[test]
+fn taking_from_inserter_clears_slot() {
+    let mut inserters = [InserterRecord {
+        object_id: 11,
+        direction: InserterDirection::default(),
+        inv: InserterInv::default(),
+    }];
+    deposit_to_inserter(&mut inserters, 11, ITEM_STONE, 1);
+
+    let taken = take_from_inserter(&mut inserters, 11, 0, 1).unwrap();
+
+    assert_eq!(taken.item, ITEM_STONE);
+    assert_eq!(taken.count, 1);
+    assert!(inserters[0].inv.slots[0].is_empty());
+}

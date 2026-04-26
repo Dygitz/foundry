@@ -11,14 +11,29 @@ impl Plugin for FoundryGameplayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (placement_select_system, hotbar_input_system).in_set(UpdateSet::Input),
+            (
+                placement_select_system,
+                hotbar_input_system,
+                structure_pickup_input_system,
+            )
+                .in_set(UpdateSet::Input),
         )
         .add_systems(Update, (mining_input_system,).in_set(UpdateSet::Input))
         .add_systems(
             Update,
-            (chest_button_system, furnace_button_system).in_set(UpdateSet::Ui),
+            (
+                chest_button_system,
+                furnace_button_system,
+                inserter_button_system,
+            )
+                .in_set(UpdateSet::Ui),
         )
-        .add_systems(Update, (furnace_smelting_system,).in_set(UpdateSet::World));
+        .add_systems(
+            Update,
+            (furnace_smelting_system, inserter_transfer_system)
+                .chain()
+                .in_set(UpdateSet::World),
+        );
     }
 }
 
@@ -36,6 +51,12 @@ pub(crate) fn placement_select_system(
     }
     if keys.just_pressed(KeyCode::KeyC) && player.inventory.count(ITEM_CHEST) > 0 {
         placement.selected = Some(ITEM_CHEST);
+    }
+    if keys.just_pressed(KeyCode::KeyI) && player.inventory.count(ITEM_INSERTER) > 0 {
+        placement.selected = Some(ITEM_INSERTER);
+    }
+    if keys.just_pressed(KeyCode::KeyR) && placement.selected == Some(ITEM_INSERTER) {
+        placement.inserter_direction = placement.inserter_direction.next_clockwise();
     }
     if keys.just_pressed(KeyCode::Escape) {
         placement.selected = None;
@@ -169,9 +190,11 @@ pub(crate) fn mining_input_system(
     );
 
     if let Some(item) = params.placement.selected {
+        let inserter_direction = params.placement.inserter_direction;
         let placed = try_place_at_world_pos(
             world_pos,
             item,
+            inserter_direction,
             &params.config,
             &params.session,
             &mut params.runtime,
@@ -256,6 +279,811 @@ pub(crate) fn recipe_detail_label(recipe: &Recipe, inv: &Inventory) -> String {
 
 pub(crate) fn item_detail_label(item: ItemId, inv: &Inventory) -> String {
     format!("{}\n\nIn inventory: {}", item_name(item), inv.count(item))
+}
+
+#[derive(SystemParam)]
+pub(crate) struct StructurePickupParams<'w, 's> {
+    config: Res<'w, WorldRenderConfig>,
+    session: Res<'w, WorldSession>,
+    runtime: ResMut<'w, WorldRuntime>,
+    player: ResMut<'w, PlayerState>,
+    hotbar_interactions: Query<'w, 's, &'static Interaction, With<HotbarSlotButton>>,
+    pickup: ResMut<'w, StructurePickupState>,
+    ui_state: Res<'w, UiState>,
+    images: ResMut<'w, Assets<Image>>,
+    map: ResMut<'w, MapState>,
+    services: NonSend<'w, StorageServices>,
+    time: Res<'w, Time>,
+    queue: ResMut<'w, SaveQueue>,
+    status: ResMut<'w, StorageStatus>,
+    highlight: Res<'w, ClickHighlight>,
+}
+
+pub(crate) fn structure_pickup_input_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mut params: StructurePickupParams,
+) {
+    if params.ui_state.mode != UiMode::None || !buttons.pressed(MouseButton::Right) {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    }
+    if params
+        .hotbar_interactions
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    };
+
+    let tile_x = (world_pos.x / params.config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / params.config.tile_size).floor() as i32;
+    let Some(target) = pickup_target_at_tile(
+        tile_x,
+        tile_y,
+        &params.config,
+        &params.session,
+        &params.runtime,
+    ) else {
+        reset_structure_pickup(&mut params.pickup);
+        return;
+    };
+
+    if params.pickup.target.as_ref() != Some(&target) {
+        params.pickup.target = Some(target.clone());
+        params.pickup.elapsed_secs = 0.0;
+    }
+    params.pickup.elapsed_secs += params.time.delta_secs();
+
+    if params.pickup.elapsed_secs < STRUCTURE_PICKUP_SECONDS {
+        return;
+    }
+
+    let picked_up = try_pick_up_structure(
+        &target,
+        &params.config,
+        &params.session,
+        &mut params.runtime,
+        &mut params.player,
+        &mut params.images,
+        &mut params.map,
+        &params.services,
+        &params.time,
+        &mut params.queue,
+        &mut params.status,
+        params.highlight.tile,
+    );
+    reset_structure_pickup(&mut params.pickup);
+    if picked_up {
+        params.player.set_changed();
+    }
+}
+
+fn reset_structure_pickup(pickup: &mut StructurePickupState) {
+    pickup.target = None;
+    pickup.elapsed_secs = 0.0;
+}
+
+pub(crate) fn pickup_target_at_tile(
+    tile_x: i32,
+    tile_y: i32,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &WorldRuntime,
+) -> Option<StructurePickupTarget> {
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    let loaded = runtime.loaded.get(&key)?;
+    let idx = (local_y as usize) * CHUNK_EDGE as usize + local_x as usize;
+    let cell = loaded.data.placed.get(idx)?;
+    if cell.object_id == 0 || placed_kind_to_item(cell.kind).is_none() {
+        return None;
+    }
+    Some(StructurePickupTarget {
+        key,
+        tile_x,
+        tile_y,
+        local_x,
+        local_y,
+        kind: cell.kind,
+        object_id: cell.object_id,
+    })
+}
+
+pub(crate) fn try_pick_up_structure(
+    target: &StructurePickupTarget,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &mut WorldRuntime,
+    player: &mut PlayerState,
+    images: &mut Assets<Image>,
+    map: &mut MapState,
+    services: &StorageServices,
+    time: &Time,
+    queue: &mut SaveQueue,
+    status: &mut StorageStatus,
+    highlight: Option<(i32, i32)>,
+) -> bool {
+    let (texture_handle, data_snapshot, pickups) = {
+        let Some(loaded) = runtime.loaded.get_mut(&target.key) else {
+            return false;
+        };
+        let idx = (target.local_y as usize) * CHUNK_EDGE as usize + target.local_x as usize;
+        let Some(current) = loaded.data.placed.get(idx).copied() else {
+            return false;
+        };
+        if current.kind != target.kind || current.object_id != target.object_id {
+            return false;
+        }
+
+        let pickups =
+            collect_structure_pickup_items(&mut loaded.data, current.kind, current.object_id);
+        let Some(cell) = loaded.data.placed.get_mut(idx) else {
+            return false;
+        };
+        cell.kind = PLACED_NONE;
+        cell.object_id = 0;
+
+        (loaded.texture_handle.clone(), loaded.data.clone(), pickups)
+    };
+
+    for (item, amount) in pickups {
+        player.inventory.add(item, amount);
+    }
+
+    runtime.touch(&target.key);
+    refresh_chunk_texture(
+        images,
+        &texture_handle,
+        &data_snapshot,
+        config,
+        session.world_seed,
+        highlight,
+    );
+    upsert_map_snapshot(
+        map,
+        images,
+        &target.key,
+        &data_snapshot,
+        session.world_seed,
+        time.elapsed().as_millis() as u64,
+    );
+    queue_chunk_save(
+        &target.key,
+        &data_snapshot,
+        services,
+        session,
+        time,
+        runtime,
+        queue,
+        status,
+    );
+    true
+}
+
+fn collect_structure_pickup_items(
+    data: &mut SimChunkData,
+    kind: PlacedId,
+    object_id: ObjectId,
+) -> Vec<(ItemId, u32)> {
+    let mut pickups = Vec::new();
+    if let Some(item) = placed_kind_to_item(kind) {
+        pickups.push((item, 1));
+    }
+
+    if kind == PLACED_CHEST {
+        if let Some(index) = data
+            .chests
+            .iter()
+            .position(|chest| chest.object_id == object_id)
+        {
+            let chest = data.chests.remove(index);
+            for slot in chest.inv.slots {
+                push_slot_pickup(&mut pickups, slot);
+            }
+        }
+    } else if kind == PLACED_FURNACE {
+        if let Some(index) = data
+            .furnaces
+            .iter()
+            .position(|furnace| furnace.object_id == object_id)
+        {
+            let furnace = data.furnaces.remove(index);
+            push_slot_pickup(&mut pickups, furnace.state.input);
+            push_slot_pickup(&mut pickups, furnace.state.fuel);
+            push_slot_pickup(&mut pickups, furnace.state.output);
+        }
+    } else if kind == PLACED_INSERTER {
+        if let Some(index) = data
+            .inserters
+            .iter()
+            .position(|inserter| inserter.object_id == object_id)
+        {
+            let inserter = data.inserters.remove(index);
+            for slot in inserter.inv.slots {
+                push_slot_pickup(&mut pickups, slot);
+            }
+        }
+    }
+
+    pickups
+}
+
+fn push_slot_pickup(pickups: &mut Vec<(ItemId, u32)>, slot: Slot) {
+    if !slot.is_empty() {
+        pickups.push((slot.item, slot.count));
+    }
+}
+
+const INSERTER_FUEL_BUFFER: u32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InserterTile {
+    pub(crate) world_id: WorldId,
+    pub(crate) layer: ChunkLayer,
+    pub(crate) tile_x: i32,
+    pub(crate) tile_y: i32,
+    pub(crate) object_id: ObjectId,
+    pub(crate) direction: InserterDirection,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum TransferEndpoint {
+    Chest { object_id: ObjectId },
+    Furnace { object_id: ObjectId },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum TransferSource {
+    ChestSlot {
+        object_id: ObjectId,
+        slot_idx: usize,
+    },
+    FurnaceOutput {
+        object_id: ObjectId,
+    },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum TransferTarget {
+    Chest { object_id: ObjectId },
+    FurnaceInput { object_id: ObjectId },
+    FurnaceFuel { object_id: ObjectId },
+}
+
+pub(crate) fn inserter_transfer_system(
+    time: Res<Time>,
+    mut inserters: ResMut<InserterState>,
+    mut runtime: ResMut<WorldRuntime>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+) {
+    inserters.timer.tick(time.delta());
+    if !inserters.timer.just_finished() {
+        return;
+    }
+
+    let inserter_tiles = collect_inserter_tiles(&runtime);
+    let mut save_keys = HashSet::new();
+
+    for tile in inserter_tiles {
+        let (source_endpoint, target_endpoint) = directional_transfer_endpoints(&runtime, &tile);
+        let mut moved_keys = execute_inserter_push(&mut runtime, &tile, target_endpoint);
+        if moved_keys.is_empty() {
+            moved_keys =
+                execute_inserter_pull(&mut runtime, &tile, source_endpoint, target_endpoint);
+        }
+        for key in moved_keys {
+            save_keys.insert(key);
+        }
+    }
+
+    for key in save_keys {
+        let snapshot = runtime.loaded.get(&key).map(|loaded| loaded.data.clone());
+        if let Some(snapshot) = snapshot {
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+}
+
+pub(crate) fn collect_inserter_tiles(runtime: &WorldRuntime) -> Vec<InserterTile> {
+    let mut tiles = Vec::new();
+    let edge = CHUNK_EDGE as usize;
+
+    for (key, loaded) in &runtime.loaded {
+        for (idx, placed) in loaded.data.placed.iter().enumerate() {
+            if placed.kind != PLACED_INSERTER || placed.object_id == 0 {
+                continue;
+            }
+            let local_x = (idx % edge) as i32;
+            let local_y = (idx / edge) as i32;
+            tiles.push(InserterTile {
+                world_id: key.world_id.clone(),
+                layer: key.layer,
+                tile_x: loaded.data.coord.cx * CHUNK_EDGE as i32 + local_x,
+                tile_y: loaded.data.coord.cy * CHUNK_EDGE as i32 + local_y,
+                object_id: placed.object_id,
+                direction: loaded
+                    .data
+                    .inserters
+                    .iter()
+                    .find(|inserter| inserter.object_id == placed.object_id)
+                    .map(|inserter| inserter.direction)
+                    .unwrap_or_default(),
+            });
+        }
+    }
+
+    tiles.sort_by_key(|tile| (tile.layer, tile.tile_y, tile.tile_x));
+    tiles
+}
+
+pub(crate) fn directional_transfer_endpoints(
+    runtime: &WorldRuntime,
+    tile: &InserterTile,
+) -> (Option<TransferEndpoint>, Option<TransferEndpoint>) {
+    let (source_dx, source_dy) = tile.direction.back_offset();
+    let (target_dx, target_dy) = tile.direction.forward_offset();
+    (
+        transfer_endpoint_at(
+            runtime,
+            &tile.world_id,
+            tile.layer,
+            tile.tile_x + source_dx,
+            tile.tile_y + source_dy,
+        ),
+        transfer_endpoint_at(
+            runtime,
+            &tile.world_id,
+            tile.layer,
+            tile.tile_x + target_dx,
+            tile.tile_y + target_dy,
+        ),
+    )
+}
+
+pub(crate) fn transfer_endpoint_at(
+    runtime: &WorldRuntime,
+    world_id: &WorldId,
+    layer: ChunkLayer,
+    tile_x: i32,
+    tile_y: i32,
+) -> Option<TransferEndpoint> {
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(world_id.clone(), coord, layer);
+    let loaded = runtime.loaded.get(&key)?;
+    let idx = (local_y as usize) * CHUNK_EDGE as usize + local_x as usize;
+    let cell = loaded.data.placed.get(idx)?;
+    match cell.kind {
+        PLACED_CHEST if cell.object_id != 0 => Some(TransferEndpoint::Chest {
+            object_id: cell.object_id,
+        }),
+        PLACED_FURNACE if cell.object_id != 0 => Some(TransferEndpoint::Furnace {
+            object_id: cell.object_id,
+        }),
+        _ => None,
+    }
+}
+
+fn first_chest_slot_matching(
+    runtime: &WorldRuntime,
+    object_id: ObjectId,
+    predicate: impl Fn(ItemId) -> bool,
+) -> Option<(usize, ItemId)> {
+    let chest = find_chest(runtime, object_id)?;
+    chest
+        .inv
+        .slots
+        .iter()
+        .enumerate()
+        .find(|(_, slot)| !slot.is_empty() && predicate(slot.item))
+        .map(|(idx, slot)| (idx, slot.item))
+}
+
+fn first_inserter_slot_matching(
+    runtime: &WorldRuntime,
+    object_id: ObjectId,
+    predicate: impl Fn(ItemId) -> bool,
+) -> Option<(usize, ItemId)> {
+    let inserter = find_inserter(runtime, object_id)?;
+    inserter
+        .inv
+        .slots
+        .iter()
+        .enumerate()
+        .find(|(_, slot)| !slot.is_empty() && predicate(slot.item))
+        .map(|(idx, slot)| (idx, slot.item))
+}
+
+fn inserter_can_accept(runtime: &WorldRuntime, object_id: ObjectId, item: ItemId) -> bool {
+    find_inserter(runtime, object_id)
+        .map(|inserter| {
+            inserter
+                .inv
+                .slots
+                .iter()
+                .any(|slot| slot_can_accept(*slot, item))
+        })
+        .unwrap_or(false)
+}
+
+fn best_target_for_item(
+    runtime: &WorldRuntime,
+    endpoints: &[TransferEndpoint],
+    item: ItemId,
+    exclude: Option<TransferEndpoint>,
+) -> Option<TransferTarget> {
+    if item == ITEM_COAL {
+        for endpoint in endpoints {
+            if Some(*endpoint) == exclude {
+                continue;
+            }
+            let TransferEndpoint::Furnace { object_id } = *endpoint else {
+                continue;
+            };
+            let target = TransferTarget::FurnaceFuel { object_id };
+            if target_can_accept(runtime, target, item) {
+                return Some(target);
+            }
+        }
+    }
+
+    if smelt_output_for_input(item).is_some() {
+        for endpoint in endpoints {
+            if Some(*endpoint) == exclude {
+                continue;
+            }
+            let TransferEndpoint::Furnace { object_id } = *endpoint else {
+                continue;
+            };
+            let target = TransferTarget::FurnaceInput { object_id };
+            if target_can_accept(runtime, target, item) {
+                return Some(target);
+            }
+        }
+    }
+
+    for endpoint in endpoints {
+        if Some(*endpoint) == exclude {
+            continue;
+        }
+        let TransferEndpoint::Chest { object_id } = *endpoint else {
+            continue;
+        };
+        let target = TransferTarget::Chest { object_id };
+        if target_can_accept(runtime, target, item) {
+            return Some(target);
+        }
+    }
+
+    None
+}
+
+fn best_pull_source(
+    runtime: &WorldRuntime,
+    inserter_id: ObjectId,
+    source_endpoint: TransferEndpoint,
+    target_endpoint: TransferEndpoint,
+) -> Option<TransferSource> {
+    let target_endpoints = [target_endpoint];
+
+    if let TransferEndpoint::Furnace { object_id } = source_endpoint {
+        if let Some(furnace) = find_furnace(runtime, object_id) {
+            let output = furnace.state.output;
+            if !output.is_empty()
+                && inserter_can_accept(runtime, inserter_id, output.item)
+                && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
+            {
+                return Some(TransferSource::FurnaceOutput { object_id });
+            }
+        }
+    }
+
+    let TransferEndpoint::Chest { object_id } = source_endpoint else {
+        return None;
+    };
+
+    if let Some((slot_idx, _)) = first_chest_slot_matching(runtime, object_id, |item| {
+        item == ITEM_COAL
+            && inserter_can_accept(runtime, inserter_id, item)
+            && best_target_for_item(runtime, &target_endpoints, item, None).is_some()
+    }) {
+        return Some(TransferSource::ChestSlot {
+            object_id,
+            slot_idx,
+        });
+    }
+
+    if let Some((slot_idx, _)) = first_chest_slot_matching(runtime, object_id, |item| {
+        smelt_output_for_input(item).is_some()
+            && inserter_can_accept(runtime, inserter_id, item)
+            && best_target_for_item(runtime, &target_endpoints, item, None).is_some()
+    }) {
+        return Some(TransferSource::ChestSlot {
+            object_id,
+            slot_idx,
+        });
+    }
+
+    if let Some((slot_idx, _)) = first_chest_slot_matching(runtime, object_id, |item| {
+        inserter_can_accept(runtime, inserter_id, item)
+            && best_target_for_item(runtime, &target_endpoints, item, None).is_some()
+    }) {
+        return Some(TransferSource::ChestSlot {
+            object_id,
+            slot_idx,
+        });
+    }
+
+    None
+}
+
+fn target_can_accept(runtime: &WorldRuntime, target: TransferTarget, item: ItemId) -> bool {
+    match target {
+        TransferTarget::Chest { object_id } => find_chest(runtime, object_id)
+            .map(|chest| {
+                chest
+                    .inv
+                    .slots
+                    .iter()
+                    .any(|slot| slot_can_accept(*slot, item))
+            })
+            .unwrap_or(false),
+        TransferTarget::FurnaceInput { object_id } => {
+            if smelt_output_for_input(item).is_none() {
+                return false;
+            }
+            find_furnace(runtime, object_id)
+                .map(|furnace| slot_can_accept(furnace.state.input, item))
+                .unwrap_or(false)
+        }
+        TransferTarget::FurnaceFuel { object_id } => {
+            if item != ITEM_COAL {
+                return false;
+            }
+            find_furnace(runtime, object_id)
+                .map(|furnace| {
+                    slot_can_accept(furnace.state.fuel, item)
+                        && (furnace.state.fuel.is_empty()
+                            || furnace.state.fuel.count < INSERTER_FUEL_BUFFER)
+                })
+                .unwrap_or(false)
+        }
+    }
+}
+
+fn slot_can_accept(slot: Slot, item: ItemId) -> bool {
+    item != ITEM_NONE && (slot.is_empty() || slot.item == item)
+}
+
+fn execute_inserter_push(
+    runtime: &mut WorldRuntime,
+    tile: &InserterTile,
+    target_endpoint: Option<TransferEndpoint>,
+) -> Vec<ChunkKey> {
+    let Some(target_endpoint) = target_endpoint else {
+        return Vec::new();
+    };
+    let Some((slot_idx, item)) = first_inserter_slot_matching(runtime, tile.object_id, |_| true)
+    else {
+        return Vec::new();
+    };
+    let target_endpoints = [target_endpoint];
+    let Some(target) = best_target_for_item(runtime, &target_endpoints, item, None) else {
+        return Vec::new();
+    };
+
+    let Some((inserter_key, slot)) = take_from_inserter_source(runtime, tile.object_id, slot_idx)
+    else {
+        return Vec::new();
+    };
+
+    let Some((target_key, moved)) =
+        deposit_to_transfer_target(runtime, target, slot.item, slot.count)
+    else {
+        restore_inserter_source(runtime, tile.object_id, slot);
+        return Vec::new();
+    };
+    if moved != slot.count {
+        restore_inserter_source(runtime, tile.object_id, slot);
+        return Vec::new();
+    }
+
+    if inserter_key == target_key {
+        vec![inserter_key]
+    } else {
+        vec![inserter_key, target_key]
+    }
+}
+
+fn execute_inserter_pull(
+    runtime: &mut WorldRuntime,
+    tile: &InserterTile,
+    source_endpoint: Option<TransferEndpoint>,
+    target_endpoint: Option<TransferEndpoint>,
+) -> Vec<ChunkKey> {
+    let (Some(source_endpoint), Some(target_endpoint)) = (source_endpoint, target_endpoint) else {
+        return Vec::new();
+    };
+    let Some(source) = best_pull_source(runtime, tile.object_id, source_endpoint, target_endpoint)
+    else {
+        return Vec::new();
+    };
+    let Some((source_key, slot)) = take_from_transfer_source(runtime, source) else {
+        return Vec::new();
+    };
+    let Some((inserter_key, moved)) =
+        deposit_to_inserter_target(runtime, tile.object_id, slot.item, slot.count)
+    else {
+        restore_transfer_source(runtime, source, slot);
+        return Vec::new();
+    };
+    if moved != slot.count {
+        restore_transfer_source(runtime, source, slot);
+        return Vec::new();
+    }
+
+    if source_key == inserter_key {
+        vec![source_key]
+    } else {
+        vec![source_key, inserter_key]
+    }
+}
+
+fn take_from_inserter_source(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    slot_idx: usize,
+) -> Option<(ChunkKey, Slot)> {
+    with_inserter_mut(runtime, object_id, |data| {
+        take_from_inserter(&mut data.inserters, object_id, slot_idx, 1)
+    })
+    .and_then(|(key, _, slot)| slot.map(|slot| (key, slot)))
+}
+
+fn take_from_transfer_source(
+    runtime: &mut WorldRuntime,
+    source: TransferSource,
+) -> Option<(ChunkKey, Slot)> {
+    match source {
+        TransferSource::ChestSlot {
+            object_id,
+            slot_idx,
+        } => with_chest_mut(runtime, object_id, |data| {
+            take_from_chest(&mut data.chests, object_id, slot_idx, 1)
+        })
+        .and_then(|(key, _, slot)| slot.map(|slot| (key, slot))),
+        TransferSource::FurnaceOutput { object_id } => {
+            with_furnace_mut(runtime, object_id, |data| {
+                take_from_furnace(&mut data.furnaces, object_id, FurnaceSlot::Output, 1)
+            })
+            .and_then(|(key, _, slot)| slot.map(|slot| (key, slot)))
+        }
+    }
+}
+
+fn deposit_to_transfer_target(
+    runtime: &mut WorldRuntime,
+    target: TransferTarget,
+    item: ItemId,
+    amount: u32,
+) -> Option<(ChunkKey, u32)> {
+    match target {
+        TransferTarget::Chest { object_id } => with_chest_mut(runtime, object_id, |data| {
+            deposit_to_chest(&mut data.chests, object_id, item, amount)
+        })
+        .map(|(key, _, moved)| (key, moved)),
+        TransferTarget::FurnaceInput { object_id } => {
+            if smelt_output_for_input(item).is_none() {
+                return None;
+            }
+            with_furnace_mut(runtime, object_id, |data| {
+                deposit_to_furnace_input(&mut data.furnaces, object_id, item, amount)
+            })
+            .map(|(key, _, moved)| (key, moved))
+        }
+        TransferTarget::FurnaceFuel { object_id } => {
+            if item != ITEM_COAL {
+                return None;
+            }
+            with_furnace_mut(runtime, object_id, |data| {
+                deposit_to_furnace_fuel(&mut data.furnaces, object_id, item, amount)
+            })
+            .map(|(key, _, moved)| (key, moved))
+        }
+    }
+}
+
+fn deposit_to_inserter_target(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    item: ItemId,
+    amount: u32,
+) -> Option<(ChunkKey, u32)> {
+    with_inserter_mut(runtime, object_id, |data| {
+        deposit_to_inserter(&mut data.inserters, object_id, item, amount)
+    })
+    .map(|(key, _, moved)| (key, moved))
+}
+
+fn restore_inserter_source(runtime: &mut WorldRuntime, object_id: ObjectId, slot: Slot) {
+    if slot.is_empty() {
+        return;
+    }
+    let _ = with_inserter_mut(runtime, object_id, |data| {
+        deposit_to_inserter(&mut data.inserters, object_id, slot.item, slot.count)
+    });
+}
+
+fn restore_transfer_source(runtime: &mut WorldRuntime, source: TransferSource, slot: Slot) {
+    if slot.is_empty() {
+        return;
+    }
+    match source {
+        TransferSource::ChestSlot { object_id, .. } => {
+            let _ = with_chest_mut(runtime, object_id, |data| {
+                deposit_to_chest(&mut data.chests, object_id, slot.item, slot.count)
+            });
+        }
+        TransferSource::FurnaceOutput { object_id } => {
+            let _ = with_furnace_mut(runtime, object_id, |data| {
+                let Some(furnace) = data
+                    .furnaces
+                    .iter_mut()
+                    .find(|furnace| furnace.object_id == object_id)
+                else {
+                    return 0;
+                };
+                deposit_to_slot_unchecked(&mut furnace.state.output, slot.item, slot.count)
+            });
+        }
+    }
+}
+
+fn deposit_to_slot_unchecked(slot: &mut Slot, item: ItemId, amount: u32) -> u32 {
+    if item == ITEM_NONE || amount == 0 {
+        return 0;
+    }
+    if slot.is_empty() {
+        slot.item = item;
+        slot.count = amount;
+        return amount;
+    }
+    if slot.item == item {
+        slot.count = slot.count.saturating_add(amount);
+        return amount;
+    }
+    0
 }
 
 pub(crate) fn refresh_highlight_chunk(
@@ -443,6 +1271,7 @@ pub(crate) fn try_mine_tile(
 pub(crate) fn try_place_at_world_pos(
     world_pos: Vec2,
     item: ItemId,
+    inserter_direction: InserterDirection,
     config: &WorldRenderConfig,
     session: &WorldSession,
     runtime: &mut WorldRuntime,
@@ -458,8 +1287,21 @@ pub(crate) fn try_place_at_world_pos(
     let tile_x = (world_pos.x / config.tile_size).floor() as i32;
     let tile_y = (world_pos.y / config.tile_size).floor() as i32;
     try_place_tile(
-        tile_x, tile_y, item, config, session, runtime, player, images, map, services, time, queue,
-        status, highlight,
+        tile_x,
+        tile_y,
+        item,
+        inserter_direction,
+        config,
+        session,
+        runtime,
+        player,
+        images,
+        map,
+        services,
+        time,
+        queue,
+        status,
+        highlight,
     )
 }
 
@@ -467,6 +1309,7 @@ pub(crate) fn try_place_tile(
     tile_x: i32,
     tile_y: i32,
     item: ItemId,
+    inserter_direction: InserterDirection,
     config: &WorldRenderConfig,
     session: &WorldSession,
     runtime: &mut WorldRuntime,
@@ -532,6 +1375,19 @@ pub(crate) fn try_place_tile(
                 loaded.data.furnaces.push(FurnaceRecord {
                     object_id,
                     state: FurnaceState::default(),
+                });
+            }
+        } else if placed_kind == PLACED_INSERTER {
+            if !loaded
+                .data
+                .inserters
+                .iter()
+                .any(|inserter| inserter.object_id == object_id)
+            {
+                loaded.data.inserters.push(InserterRecord {
+                    object_id,
+                    direction: inserter_direction,
+                    inv: InserterInv::default(),
                 });
             }
         }
@@ -738,6 +1594,47 @@ pub(crate) fn furnace_button_system(
                     &mut status,
                 );
             }
+        }
+    }
+}
+
+pub(crate) fn inserter_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &InserterSlotButton), Changed<Interaction>>,
+) {
+    let UiMode::Inserter { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let result = with_inserter_mut(&mut runtime, object_id, |data| {
+            take_from_inserter(&mut data.inserters, object_id, button.index, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
         }
     }
 }

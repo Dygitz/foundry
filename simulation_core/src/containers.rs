@@ -1,6 +1,7 @@
 use crate::{ITEM_NONE, ItemId, ObjectId};
 
 pub const CHEST_SLOT_COUNT: usize = 16;
+pub const INSERTER_SLOT_COUNT: usize = 4;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Slot {
@@ -42,6 +43,95 @@ impl Default for ContainerInv {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InserterInv {
+    pub slots: [Slot; INSERTER_SLOT_COUNT],
+}
+
+impl Default for InserterInv {
+    fn default() -> Self {
+        Self {
+            slots: [Slot::default(); INSERTER_SLOT_COUNT],
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InserterDirection {
+    Up,
+    Right,
+    Down,
+    Left,
+}
+
+impl Default for InserterDirection {
+    fn default() -> Self {
+        Self::Right
+    }
+}
+
+impl InserterDirection {
+    pub fn next_clockwise(self) -> Self {
+        match self {
+            Self::Up => Self::Right,
+            Self::Right => Self::Down,
+            Self::Down => Self::Left,
+            Self::Left => Self::Up,
+        }
+    }
+
+    pub fn forward_offset(self) -> (i32, i32) {
+        match self {
+            Self::Up => (0, 1),
+            Self::Right => (1, 0),
+            Self::Down => (0, -1),
+            Self::Left => (-1, 0),
+        }
+    }
+
+    pub fn back_offset(self) -> (i32, i32) {
+        let (dx, dy) = self.forward_offset();
+        (-dx, -dy)
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Up => 0,
+            Self::Right => 1,
+            Self::Down => 2,
+            Self::Left => 3,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Up),
+            1 => Some(Self::Right),
+            2 => Some(Self::Down),
+            3 => Some(Self::Left),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Up => "Up",
+            Self::Right => "Right",
+            Self::Down => "Down",
+            Self::Left => "Left",
+        }
+    }
+
+    pub fn arrow(self) -> &'static str {
+        match self {
+            Self::Up => "^",
+            Self::Right => ">",
+            Self::Down => "v",
+            Self::Left => "<",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FurnaceState {
     pub input: Slot,
     pub fuel: Slot,
@@ -70,6 +160,13 @@ pub struct ChestRecord {
 pub struct FurnaceRecord {
     pub object_id: ObjectId,
     pub state: FurnaceState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InserterRecord {
+    pub object_id: ObjectId,
+    pub direction: InserterDirection,
+    pub inv: InserterInv,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -188,6 +285,40 @@ pub fn deposit_to_furnace_fuel(
         return 0;
     };
     deposit_to_slot(&mut furnace.state.fuel, item, amount)
+}
+
+pub fn take_from_inserter(
+    inserters: &mut [InserterRecord],
+    object_id: ObjectId,
+    slot_idx: usize,
+    amount: u32,
+) -> Option<Slot> {
+    let inserter = inserters
+        .iter_mut()
+        .find(|inserter| inserter.object_id == object_id)?;
+    let slot = inserter.inv.slots.get_mut(slot_idx)?;
+    take_from_slot(slot, amount)
+}
+
+pub fn deposit_to_inserter(
+    inserters: &mut [InserterRecord],
+    object_id: ObjectId,
+    item: ItemId,
+    amount: u32,
+) -> u32 {
+    let inserter = inserters
+        .iter_mut()
+        .find(|inserter| inserter.object_id == object_id);
+    let Some(inserter) = inserter else {
+        return 0;
+    };
+    for slot in &mut inserter.inv.slots {
+        let moved = deposit_to_slot(slot, item, amount);
+        if moved > 0 {
+            return moved;
+        }
+    }
+    0
 }
 
 #[cfg(test)]

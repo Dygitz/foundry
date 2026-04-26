@@ -168,6 +168,27 @@ pub(crate) struct FurnaceDepositCountText {
 pub(crate) struct FurnaceProgressBar;
 
 #[derive(Component)]
+pub(crate) struct InserterPanel;
+
+#[derive(Component)]
+pub(crate) struct InserterDirectionText;
+
+#[derive(Component)]
+pub(crate) struct InserterSlotButton {
+    pub(crate) index: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct InserterSlotIcon {
+    pub(crate) index: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct InserterSlotCountText {
+    pub(crate) index: usize,
+}
+
+#[derive(Component)]
 pub(crate) struct MiningFeedbackPanel;
 
 #[derive(Component)]
@@ -178,6 +199,24 @@ pub(crate) struct MiningProgressFill;
 
 #[derive(Component)]
 pub(crate) struct MiningProgressText;
+
+#[derive(Component)]
+pub(crate) struct PickupFeedbackPanel;
+
+#[derive(Component)]
+pub(crate) struct PickupInstructionText;
+
+#[derive(Component)]
+pub(crate) struct PickupProgressFill;
+
+#[derive(Component)]
+pub(crate) struct PickupProgressText;
+
+#[derive(Component)]
+pub(crate) struct PlacementDirectionPanel;
+
+#[derive(Component)]
+pub(crate) struct PlacementDirectionText;
 
 #[derive(Component)]
 pub(crate) struct Player;

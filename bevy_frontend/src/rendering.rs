@@ -16,6 +16,7 @@ pub(crate) enum HudIconKind {
     CopperPlate,
     Furnace,
     Chest,
+    Inserter,
     Anvil,
 }
 
@@ -131,6 +132,16 @@ pub(crate) fn build_hud_icon_image(kind: HudIconKind) -> Image {
             fill_icon_rect(&mut pixels, size, 3, 7, 12, 8, [81, 52, 29, 255]);
             fill_icon_rect(&mut pixels, size, 7, 7, 8, 9, [218, 178, 83, 255]);
             fill_icon_rect(&mut pixels, size, 4, 10, 11, 12, [128, 81, 42, 255]);
+        }
+        HudIconKind::Inserter => {
+            fill_icon_rect(&mut pixels, size, 3, 7, 12, 9, [49, 51, 48, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 6, 7, 10, [205, 150, 49, 255]);
+            fill_icon_rect(&mut pixels, size, 8, 5, 10, 11, [226, 174, 62, 255]);
+            fill_icon_rect(&mut pixels, size, 11, 6, 12, 10, [78, 82, 76, 255]);
+            fill_icon_rect(&mut pixels, size, 6, 4, 9, 5, [242, 204, 92, 255]);
+            fill_icon_rect(&mut pixels, size, 6, 11, 9, 12, [144, 96, 32, 255]);
+            set_icon_pixel(&mut pixels, size, 12, 5, [235, 224, 151, 255]);
+            set_icon_pixel(&mut pixels, size, 13, 8, [235, 224, 151, 255]);
         }
         HudIconKind::Anvil => {
             fill_icon_rect(&mut pixels, size, 4, 3, 12, 5, [50, 53, 56, 255]);
@@ -472,6 +483,7 @@ pub(crate) fn placed_color(kind: PlacedId) -> [u8; 4] {
     match kind {
         PLACED_FURNACE => [90, 90, 100, 255],
         PLACED_CHEST => [150, 95, 55, 255],
+        PLACED_INSERTER => [216, 168, 54, 255],
         _ => [0, 0, 0, 0],
     }
 }
