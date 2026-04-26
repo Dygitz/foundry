@@ -26,8 +26,8 @@ use simulation_core::{
     ITEM_FURNACE, ITEM_IRON_ORE, ITEM_IRON_PLATE, ITEM_NONE, ITEM_STONE, Inventory, ItemId,
     ObjectId, PLACED_CHEST, PLACED_FURNACE, PLACED_NONE, PlacedCell, PlacedId, RES_COAL,
     RES_COPPER, RES_IRON, RES_NONE, RES_STONE, ResourceCell, ResourceId, SimChunkData,
-    SimChunkView, TileId, deposit_to_chest, deposit_to_furnace_fuel, deposit_to_furnace_input,
-    take_from_chest, take_from_furnace,
+    SimChunkView, Slot, TileId, deposit_to_chest, deposit_to_furnace_fuel,
+    deposit_to_furnace_input, take_from_chest, take_from_furnace,
 };
 use web_storage_indexeddb::IndexedDbStorage;
 
@@ -45,7 +45,9 @@ pub fn run() {
         .insert_resource(PlayerStateSaveState::default())
         .insert_resource(PlayerStateLoadState::default())
         .insert_resource(PlacementState::default())
+        .insert_resource(HotbarState::default())
         .insert_resource(UiState::default())
+        .insert_resource(CraftingUiState::default())
         .insert_resource(ClickHighlight::default())
         .insert_resource(DebugConfig::default())
         .insert_resource(EvictionStats::default())
@@ -58,6 +60,7 @@ pub fn run() {
         .insert_resource(RecoveryState::default())
         .add_event::<ChunkLoadRequest>()
         .add_event::<ChunkLoaded>()
+        .add_event::<PickupNotice>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 fit_canvas_to_parent: true,
@@ -90,9 +93,9 @@ pub fn run() {
                 map_toggle_system,
                 full_map_input_system,
                 placement_select_system,
+                hotbar_input_system,
                 ui_close_system,
                 inventory_debug_input_system,
-                crafting_input_system,
             )
                 .in_set(UpdateSet::Input),
         )
@@ -101,9 +104,16 @@ pub fn run() {
             Update,
             (
                 ui_visibility_system,
-                inventory_text_system,
-                placement_text_system,
+                hotbar_auto_assign_system,
+                hotbar_button_system,
+                hotbar_ui_system,
                 craft_menu_text_system,
+                inventory_cell_hover_system,
+                crafting_recipe_button_system,
+                crafting_panel_text_system,
+                crafting_recipe_visual_system,
+                pickup_notice_spawn_system,
+                pickup_notice_lifetime_system,
                 chest_ui_system,
                 furnace_ui_system,
                 minimap_visibility_system,
@@ -375,6 +385,13 @@ struct ChunkLoaded {
     data: Option<SimChunkData>,
 }
 
+#[derive(Event, Debug, Clone, Copy)]
+struct PickupNotice {
+    item: ItemId,
+    amount: u32,
+    total: u32,
+}
+
 struct ChunkLoadTask {
     key: ChunkKey,
     task: Task<Result<Option<SimChunkData>, StorageError>>,
@@ -470,13 +487,52 @@ struct ChunkRenderTag;
 struct WorldStatsText;
 
 #[derive(Component)]
-struct InventoryText;
-
-#[derive(Component)]
 struct CraftMenuText;
 
 #[derive(Component)]
-struct PlacementText;
+struct InventoryCellButton {
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct InventoryItemCountText {
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct RecipeButton {
+    recipe_index: usize,
+}
+
+#[derive(Component)]
+struct RecipeDetailText;
+
+#[derive(Component)]
+struct HotbarSlotButton {
+    index: usize,
+}
+
+#[derive(Component)]
+struct HotbarSlotIcon {
+    index: usize,
+}
+
+#[derive(Component)]
+struct HotbarSlotCountText {
+    index: usize,
+}
+
+#[derive(Component)]
+struct PickupFeedRoot;
+
+#[derive(Component)]
+struct PickupNoticeToast {
+    item: ItemId,
+    timer: Timer,
+}
+
+#[derive(Component)]
+struct PickupNoticeText;
 
 #[derive(Component)]
 struct UiOverlay;
@@ -525,7 +581,12 @@ struct ChestSlotButton {
 }
 
 #[derive(Component)]
-struct ChestSlotText {
+struct ChestSlotIcon {
+    index: usize,
+}
+
+#[derive(Component)]
+struct ChestSlotCountText {
     index: usize,
 }
 
@@ -535,18 +596,43 @@ struct ChestDepositButton {
 }
 
 #[derive(Component)]
+struct ChestDepositIcon {
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct ChestDepositCountText {
+    item: ItemId,
+}
+
+#[derive(Component)]
 struct FurnaceSlotButton {
     slot: FurnaceSlot,
 }
 
 #[derive(Component)]
-struct FurnaceSlotText {
+struct FurnaceSlotIcon {
+    slot: FurnaceSlot,
+}
+
+#[derive(Component)]
+struct FurnaceSlotCountText {
     slot: FurnaceSlot,
 }
 
 #[derive(Component)]
 struct FurnaceDepositButton {
     slot: FurnaceSlot,
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct FurnaceDepositIcon {
+    item: ItemId,
+}
+
+#[derive(Component)]
+struct FurnaceDepositCountText {
     item: ItemId,
 }
 
@@ -577,6 +663,86 @@ struct PlacementState {
     selected: Option<ItemId>,
 }
 
+const HOTBAR_SLOT_COUNT: usize = 10;
+const HOTBAR_KEYS: [KeyCode; HOTBAR_SLOT_COUNT] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+    KeyCode::Digit0,
+];
+
+#[derive(Resource)]
+struct HotbarState {
+    slots: [Option<ItemId>; HOTBAR_SLOT_COUNT],
+    selected_slot: Option<usize>,
+}
+
+impl Default for HotbarState {
+    fn default() -> Self {
+        Self {
+            slots: [None; HOTBAR_SLOT_COUNT],
+            selected_slot: None,
+        }
+    }
+}
+
+impl HotbarState {
+    fn assign_item(&mut self, item: ItemId) {
+        if item == ITEM_NONE || !is_placeable_item(item) {
+            return;
+        }
+        if self.slots.iter().any(|slot| *slot == Some(item)) {
+            return;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(item);
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct CraftingUiState {
+    focused_recipe: usize,
+    hovered_item: Option<ItemId>,
+}
+
+#[derive(Resource, Clone)]
+struct UiIconAssets {
+    empty: Handle<Image>,
+    heart: Handle<Image>,
+    stone: Handle<Image>,
+    copper_ore: Handle<Image>,
+    coal: Handle<Image>,
+    iron_ore: Handle<Image>,
+    iron_plate: Handle<Image>,
+    copper_plate: Handle<Image>,
+    furnace: Handle<Image>,
+    chest: Handle<Image>,
+    crafting: Handle<Image>,
+}
+
+impl UiIconAssets {
+    fn for_item(&self, item: ItemId) -> Handle<Image> {
+        match item {
+            ITEM_STONE => self.stone.clone(),
+            ITEM_COPPER_ORE => self.copper_ore.clone(),
+            ITEM_COAL => self.coal.clone(),
+            ITEM_IRON_ORE => self.iron_ore.clone(),
+            ITEM_IRON_PLATE => self.iron_plate.clone(),
+            ITEM_COPPER_PLATE => self.copper_plate.clone(),
+            ITEM_FURNACE => self.furnace.clone(),
+            ITEM_CHEST => self.chest.clone(),
+            _ => self.empty.clone(),
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct UiState {
     mode: UiMode,
@@ -605,8 +771,10 @@ enum UpdateSet {
 }
 
 const MAP_CHUNK_BYTES: usize = CHUNK_TILE_COUNT * 4;
-const MINIMAP_SIZE: f32 = 192.0;
-const MINIMAP_MARGIN: f32 = 16.0;
+const MINIMAP_SIZE: f32 = 238.0;
+const MINIMAP_FRAME: f32 = 3.0;
+const MINIMAP_OUTER_SIZE: f32 = MINIMAP_SIZE + MINIMAP_FRAME * 2.0;
+const MINIMAP_MARGIN: f32 = 12.0;
 const MINIMAP_PX_PER_TILE: f32 = 1.0;
 const FULL_MAP_DEFAULT_PX_PER_TILE: f32 = 2.0;
 const FULL_MAP_MIN_PX_PER_TILE: f32 = 0.25;
@@ -699,84 +867,10 @@ fn setup(
         Facing::Down,
         Player,
     ));
-    commands.spawn((
-        Text::new("Storage: initializing"),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(12.0),
-            top: Val::Px(12.0),
-            ..default()
-        },
-        StorageStatusText,
-    ));
-    commands.spawn((
-        Text::new("Chunks: 0 | Dirty: 0 | Evict/s: 0"),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(12.0),
-            top: Val::Px(32.0),
-            ..default()
-        },
-        WorldStatsText,
-    ));
-    commands.spawn((
-        Text::new(
-            "Inventory: Iron Ore 0 | Copper Ore 0 | Coal 0 | Stone 0\n\
-Plates: Iron 0 | Copper 0 | Furnace 0 | Chest 0",
-        ),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(12.0),
-            top: Val::Px(52.0),
-            ..default()
-        },
-        InventoryText,
-    ));
-    commands.spawn((
-        Text::new("Crafting (E to open)"),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            right: Val::Px(12.0),
-            top: Val::Px(12.0),
-            ..default()
-        },
-        CraftMenuText,
-    ));
-    commands.spawn((
-        Text::new("Place: None (F furnace, C chest, Esc clear)"),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(12.0),
-            top: Val::Px(116.0),
-            ..default()
-        },
-        PlacementText,
-    ));
+    let icons = build_ui_icon_assets(&mut images);
+    commands.insert_resource(icons.clone());
+    spawn_game_hud(&mut commands, &icons);
+    spawn_pickup_feed(&mut commands);
     commands
         .spawn((
             Node {
@@ -807,35 +901,348 @@ Plates: Iron 0 | Copper 0 | Furnace 0 | Chest 0",
     commands
         .spawn((
             Node {
-                width: Val::Px(MINIMAP_SIZE),
-                height: Val::Px(MINIMAP_SIZE),
+                width: Val::Px(MINIMAP_OUTER_SIZE),
+                height: Val::Px(MINIMAP_OUTER_SIZE),
                 position_type: PositionType::Absolute,
                 right: Val::Px(MINIMAP_MARGIN),
                 bottom: Val::Px(MINIMAP_MARGIN),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 overflow: Overflow::clip(),
-                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(map_unknown_color()),
-            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.35)),
+            BackgroundColor(Color::srgba(0.44, 0.48, 0.42, 0.95)),
+            BorderRadius::all(Val::Px(4.0)),
+            hud_shadow(),
             MinimapRoot,
         ))
         .with_children(|parent| {
             parent.spawn((
                 Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
+                    width: Val::Px(MINIMAP_SIZE),
+                    height: Val::Px(MINIMAP_SIZE),
+                    position_type: PositionType::Relative,
+                    flex_shrink: 0.0,
                     overflow: Overflow::clip(),
                     ..default()
                 },
+                BackgroundColor(map_unknown_color()),
                 MapContent {
                     kind: MapSurfaceKind::Minimap,
                 },
             ));
         });
+}
+
+fn spawn_pickup_feed(commands: &mut Commands) {
+    commands.spawn((
+        Node {
+            width: Val::Px(220.0),
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(76.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(6.0),
+            ..default()
+        },
+        PickupFeedRoot,
+    ));
+}
+
+fn build_ui_icon_assets(images: &mut Assets<Image>) -> UiIconAssets {
+    UiIconAssets {
+        empty: images.add(build_hud_icon_image(HudIconKind::Empty)),
+        heart: images.add(build_hud_icon_image(HudIconKind::Heart)),
+        stone: images.add(build_hud_icon_image(HudIconKind::Stone)),
+        copper_ore: images.add(build_hud_icon_image(HudIconKind::CopperOre)),
+        coal: images.add(build_hud_icon_image(HudIconKind::Coal)),
+        iron_ore: images.add(build_hud_icon_image(HudIconKind::IronOre)),
+        iron_plate: images.add(build_hud_icon_image(HudIconKind::IronPlate)),
+        copper_plate: images.add(build_hud_icon_image(HudIconKind::CopperPlate)),
+        furnace: images.add(build_hud_icon_image(HudIconKind::Furnace)),
+        chest: images.add(build_hud_icon_image(HudIconKind::Chest)),
+        crafting: images.add(build_hud_icon_image(HudIconKind::Anvil)),
+    }
+}
+
+fn spawn_game_hud(commands: &mut Commands, icons: &UiIconAssets) {
+    commands
+        .spawn(Node {
+            width: Val::Px(422.0),
+            max_width: Val::Percent(92.0),
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(12.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(14.0),
+            ..default()
+        })
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(12.0)),
+                    row_gap: Val::Px(12.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(hud_panel_color()),
+                BorderColor(hud_border_color()),
+                BorderRadius::all(Val::Px(8.0)),
+                hud_shadow(),
+            ))
+            .with_children(|panel| {
+                spawn_health_bar(panel, icons.heart.clone());
+            });
+        });
+
+    commands
+        .spawn(Node {
+            width: Val::Px(272.0),
+            position_type: PositionType::Absolute,
+            right: Val::Px(16.0),
+            top: Val::Px(12.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(8.0),
+            ..default()
+        })
+        .with_children(|root| {
+            spawn_action_prompt(root, icons.crafting.clone(), "Crafting", "[E]");
+        });
+
+    spawn_hotbar(commands, icons);
+}
+
+fn spawn_health_bar(parent: &mut ChildSpawnerCommands, icon: Handle<Image>) {
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(28.0),
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(10.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                ImageNode::new(icon),
+                Node {
+                    width: Val::Px(28.0),
+                    height: Val::Px(28.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
+            row.spawn((
+                Node {
+                    height: Val::Px(26.0),
+                    flex_grow: 1.0,
+                    position_type: PositionType::Relative,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.02, 0.03, 0.02, 0.72)),
+                BorderRadius::all(Val::Px(9.0)),
+            ))
+            .with_children(|bar| {
+                bar.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.13, 0.78, 0.28)),
+                    BorderRadius::all(Val::Px(9.0)),
+                ));
+                bar.spawn((
+                    Text::new("100/100"),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.98, 0.98, 0.95)),
+                    TextLayout::new_with_justify(JustifyText::Center),
+                    TextShadow {
+                        offset: Vec2::new(1.0, 1.0),
+                        color: Color::srgba(0.0, 0.0, 0.0, 0.75),
+                    },
+                    Node {
+                        width: Val::Percent(100.0),
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(3.0),
+                        ..default()
+                    },
+                ));
+            });
+        });
+}
+
+fn spawn_action_prompt(
+    parent: &mut ChildSpawnerCommands,
+    icon: Handle<Image>,
+    label: &'static str,
+    key: &'static str,
+) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(54.0),
+                align_items: AlignItems::Center,
+                padding: UiRect::new(Val::Px(14.0), Val::Px(12.0), Val::Px(0.0), Val::Px(0.0)),
+                column_gap: Val::Px(12.0),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                ImageNode::new(icon),
+                Node {
+                    width: Val::Px(28.0),
+                    height: Val::Px(28.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
+            let mut label_entity = row.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.96, 0.96, 0.94)),
+                hud_text_shadow(),
+            ));
+            label_entity.insert(CraftMenuText);
+            row.spawn(Node {
+                flex_grow: 1.0,
+                ..default()
+            });
+            row.spawn((
+                Text::new(key),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.93, 0.93, 0.9)),
+                hud_text_shadow(),
+            ));
+        });
+}
+
+fn spawn_hotbar(commands: &mut Commands, icons: &UiIconAssets) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(22.0),
+            bottom: Val::Px(20.0),
+            height: Val::Px(58.0),
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .with_children(|bar| {
+            for (index, label) in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+                .into_iter()
+                .enumerate()
+            {
+                bar.spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(56.0),
+                        height: Val::Px(56.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        position_type: PositionType::Relative,
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.08, 0.11, 0.09, 0.72)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.16)),
+                    BorderRadius::all(Val::Px(7.0)),
+                    hud_shadow(),
+                    HotbarSlotButton { index },
+                ))
+                .with_children(|slot| {
+                    slot.spawn((
+                        Text::new(label),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgba(0.96, 0.96, 0.94, 0.86)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(6.0),
+                            top: Val::Px(4.0),
+                            ..default()
+                        },
+                    ));
+                    slot.spawn((
+                        ImageNode::new(icons.empty.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            ..default()
+                        },
+                        HotbarSlotIcon { index },
+                    ));
+                    slot.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.96, 0.94)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(5.0),
+                            bottom: Val::Px(3.0),
+                            ..default()
+                        },
+                        HotbarSlotCountText { index },
+                    ));
+                });
+            }
+        });
+}
+
+fn hud_panel_color() -> Color {
+    Color::srgba(0.06, 0.055, 0.045, 0.78)
+}
+
+fn hud_border_color() -> Color {
+    Color::srgba(1.0, 1.0, 1.0, 0.08)
+}
+
+fn hud_shadow() -> BoxShadow {
+    BoxShadow::new(
+        Color::srgba(0.0, 0.0, 0.0, 0.35),
+        Val::Px(0.0),
+        Val::Px(5.0),
+        Val::Px(0.0),
+        Val::Px(10.0),
+    )
+}
+
+fn hud_text_shadow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::new(1.0, 1.0),
+        color: Color::srgba(0.0, 0.0, 0.0, 0.7),
+    }
 }
 
 fn spawn_map_panel(parent: &mut ChildSpawnerCommands) {
@@ -868,279 +1275,634 @@ fn spawn_map_panel(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands) {
+fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
     parent
         .spawn((
             Node {
-                width: Val::Px(500.0),
-                height: Val::Px(320.0),
-                flex_direction: FlexDirection::Column,
+                width: Val::Px(760.0),
+                max_width: Val::Percent(92.0),
+                min_height: Val::Px(420.0),
+                flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::FlexStart,
-                padding: UiRect::all(Val::Px(12.0)),
-                row_gap: Val::Px(8.0),
+                align_items: AlignItems::Stretch,
+                padding: UiRect::all(Val::Px(16.0)),
+                column_gap: Val::Px(16.0),
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.15, 0.15, 0.18)),
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
         ))
         .with_children(|panel| {
-            panel.spawn((
-                Text::new("Crafting"),
-                TextFont {
-                    font_size: 18.0,
+            panel
+                .spawn(Node {
+                    width: Val::Px(280.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(12.0),
+                    ..default()
+                })
+                .with_children(|inventory| {
+                    inventory.spawn((
+                        Text::new("Inventory"),
+                        TextFont {
+                            font_size: 22.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                        hud_text_shadow(),
+                    ));
+                    inventory
+                        .spawn(Node {
+                            display: Display::Flex,
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: Val::Px(8.0),
+                            row_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|grid| {
+                            for item in INVENTORY_ITEMS {
+                                spawn_inventory_cell(grid, icons, item);
+                            }
+                        });
+                });
+
+            panel
+                .spawn(Node {
+                    flex_grow: 1.0,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(12.0),
+                    ..default()
+                })
+                .with_children(|crafting| {
+                    crafting.spawn((
+                        Text::new("Crafting"),
+                        TextFont {
+                            font_size: 22.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                        hud_text_shadow(),
+                    ));
+                    crafting
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(96.0),
+                            column_gap: Val::Px(10.0),
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|recipes| {
+                            for recipe_index in 0..RECIPES.len() {
+                                spawn_recipe_button(recipes, icons, recipe_index);
+                            }
+                        });
+                    crafting.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 16.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.9, 0.9, 0.87)),
+                        hud_text_shadow(),
+                        CraftPanelText,
+                        RecipeDetailText,
+                    ));
+                });
+        });
+}
+
+fn spawn_inventory_cell(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets, item: ItemId) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(64.0),
+                height: Val::Px(64.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.11, 0.09, 0.72)),
+            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.1)),
+            BorderRadius::all(Val::Px(5.0)),
+            InventoryCellButton { item },
+        ))
+        .with_children(|cell| {
+            cell.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
             ));
-            panel.spawn((
-                Text::new(
-                    "1) Furnace: 10 Stone\n\
-2) Chest: 10 Stone",
-                ),
+            cell.spawn((
+                Text::new("0"),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: 13.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                CraftPanelText,
-            ));
-            panel.spawn((
-                Text::new("Press 1-2 to craft. Esc to close."),
-                TextFont {
-                    font_size: 12.0,
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.8, 0.8, 0.8)),
+                InventoryItemCountText { item },
             ));
         });
 }
 
-fn spawn_chest_panel(parent: &mut ChildSpawnerCommands) {
+fn spawn_recipe_button(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    recipe_index: usize,
+) {
+    let Some(recipe) = recipe_for_index(recipe_index) else {
+        return;
+    };
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(72.0),
+                height: Val::Px(72.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.11, 0.09, 0.72)),
+            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+            BorderRadius::all(Val::Px(6.0)),
+            RecipeButton { recipe_index },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(recipe.output)),
+                Node {
+                    width: Val::Px(36.0),
+                    height: Val::Px(36.0),
+                    ..default()
+                },
+            ));
+        });
+}
+
+fn spawn_chest_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
     parent
         .spawn((
             Node {
-                width: Val::Px(520.0),
-                padding: UiRect::all(Val::Px(12.0)),
-                row_gap: Val::Px(8.0),
+                width: Val::Px(584.0),
+                max_width: Val::Percent(92.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
                 flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
             ChestPanel,
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("Chest"),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: 22.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
             ));
             panel
                 .spawn(Node {
-                    display: Display::Flex,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(6.0),
-                    row_gap: Val::Px(6.0),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(24.0),
                     ..default()
                 })
-                .with_children(|grid| {
-                    for index in 0..CHEST_SLOT_COUNT {
-                        grid.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(60.0),
-                                height: Val::Px(24.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
+                .with_children(|body| {
+                    body.spawn(Node {
+                        width: Val::Px(256.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|section| {
+                        spawn_panel_section_label(section, "Stored");
+                        section
+                            .spawn(Node {
+                                display: Display::Flex,
+                                flex_wrap: FlexWrap::Wrap,
+                                column_gap: Val::Px(8.0),
+                                row_gap: Val::Px(8.0),
                                 ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.18, 0.18, 0.2)),
-                            ChestSlotButton { index },
-                        ))
-                        .with_children(|button| {
-                            button.spawn((
-                                Text::new("Empty"),
-                                TextFont {
-                                    font_size: 11.0,
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                                ChestSlotText { index },
-                            ));
-                        });
-                    }
-                });
-            panel
-                .spawn(Node {
-                    display: Display::Flex,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(6.0),
-                    row_gap: Val::Px(6.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    let items = [
-                        (ITEM_IRON_ORE, "Deposit Iron"),
-                        (ITEM_COPPER_ORE, "Deposit Copper"),
-                        (ITEM_COAL, "Deposit Coal"),
-                        (ITEM_STONE, "Deposit Stone"),
-                        (ITEM_IRON_PLATE, "Deposit Iron Plate"),
-                        (ITEM_COPPER_PLATE, "Deposit Copper Plate"),
-                    ];
-                    for (item, label) in items {
-                        row.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(120.0),
-                                height: Val::Px(24.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
+                            })
+                            .with_children(|grid| {
+                                for index in 0..CHEST_SLOT_COUNT {
+                                    spawn_chest_slot_cell(grid, icons, index);
+                                }
+                            });
+                    });
+
+                    body.spawn(Node {
+                        width: Val::Px(256.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|section| {
+                        spawn_panel_section_label(section, "Inventory");
+                        section
+                            .spawn(Node {
+                                display: Display::Flex,
+                                flex_wrap: FlexWrap::Wrap,
+                                column_gap: Val::Px(8.0),
+                                row_gap: Val::Px(8.0),
                                 ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.2, 0.2, 0.22)),
-                            ChestDepositButton { item },
-                        ))
-                        .with_children(|button| {
-                            button.spawn((
-                                Text::new(label),
-                                TextFont {
-                                    font_size: 11.0,
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                            ));
-                        });
-                    }
+                            })
+                            .with_children(|grid| {
+                                for item in INVENTORY_ITEMS {
+                                    spawn_chest_deposit_cell(grid, icons, item);
+                                }
+                            });
+                    });
                 });
         });
 }
 
-fn spawn_furnace_panel(parent: &mut ChildSpawnerCommands) {
+fn spawn_chest_slot_cell(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets, index: usize) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            ChestSlotButton { index },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.empty.clone()),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                ChestSlotIcon { index },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                ChestSlotCountText { index },
+            ));
+        });
+}
+
+fn spawn_chest_deposit_cell(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets, item: ItemId) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            ChestDepositButton { item },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                ChestDepositIcon { item },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                ChestDepositCountText { item },
+            ));
+        });
+}
+
+fn spawn_furnace_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
     parent
         .spawn((
             Node {
-                width: Val::Px(360.0),
-                padding: UiRect::all(Val::Px(12.0)),
-                row_gap: Val::Px(8.0),
+                width: Val::Px(430.0),
+                max_width: Val::Percent(92.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
                 flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
             FurnacePanel,
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("Furnace"),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: 22.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
             ));
-            let slots = [
-                (FurnaceSlot::Input, "Input"),
-                (FurnaceSlot::Fuel, "Fuel"),
-                (FurnaceSlot::Output, "Output"),
-            ];
-            for (slot, label) in slots {
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(200.0),
-                            height: Val::Px(24.0),
-                            justify_content: JustifyContent::SpaceBetween,
-                            align_items: AlignItems::Center,
-                            padding: UiRect::new(
-                                Val::Px(6.0),
-                                Val::Px(6.0),
-                                Val::Px(0.0),
-                                Val::Px(0.0),
-                            ),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.18, 0.18, 0.2)),
-                        FurnaceSlotButton { slot },
-                    ))
-                    .with_children(|button| {
-                        button.spawn((
-                            Text::new(label),
-                            TextFont {
-                                font_size: 11.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                        ));
-                        button.spawn((
-                            Text::new("Empty"),
-                            TextFont {
-                                font_size: 11.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                            FurnaceSlotText { slot },
-                        ));
-                    });
-            }
             panel
                 .spawn(Node {
-                    width: Val::Px(200.0),
-                    height: Val::Px(10.0),
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    column_gap: Val::Px(18.0),
                     ..default()
                 })
+                .with_children(|slots| {
+                    spawn_furnace_slot_cell(slots, icons, FurnaceSlot::Input, "Input");
+                    spawn_furnace_slot_cell(slots, icons, FurnaceSlot::Fuel, "Fuel");
+                    spawn_furnace_slot_cell(slots, icons, FurnaceSlot::Output, "Output");
+                });
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(FURNACE_PROGRESS_BAR_WIDTH),
+                        height: Val::Px(10.0),
+                        align_self: AlignSelf::Center,
+                        overflow: Overflow::clip(),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.035, 0.78)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ))
                 .with_children(|bar| {
                     bar.spawn((
                         Node {
                             width: Val::Px(0.0),
-                            height: Val::Px(10.0),
+                            height: Val::Percent(100.0),
                             ..default()
                         },
-                        BackgroundColor(Color::srgb(0.3, 0.8, 0.3)),
+                        BackgroundColor(Color::srgb(0.32, 0.78, 0.28)),
                         FurnaceProgressBar,
                     ));
                 });
             panel
                 .spawn(Node {
-                    display: Display::Flex,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(6.0),
-                    row_gap: Val::Px(6.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
                     ..default()
                 })
-                .with_children(|row| {
-                    let inputs = [
-                        (FurnaceSlot::Input, ITEM_IRON_ORE, "Input Iron"),
-                        (FurnaceSlot::Input, ITEM_COPPER_ORE, "Input Copper"),
-                        (FurnaceSlot::Fuel, ITEM_COAL, "Fuel Coal"),
-                    ];
-                    for (slot, item, label) in inputs {
-                        row.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(120.0),
-                                height: Val::Px(24.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.2, 0.2, 0.22)),
-                            FurnaceDepositButton { slot, item },
-                        ))
-                        .with_children(|button| {
-                            button.spawn((
-                                Text::new(label),
-                                TextFont {
-                                    font_size: 11.0,
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                            ));
+                .with_children(|section| {
+                    spawn_panel_section_label(section, "Inventory");
+                    section
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_furnace_deposit_cell(
+                                row,
+                                icons,
+                                FurnaceSlot::Input,
+                                ITEM_IRON_ORE,
+                            );
+                            spawn_furnace_deposit_cell(
+                                row,
+                                icons,
+                                FurnaceSlot::Input,
+                                ITEM_COPPER_ORE,
+                            );
+                            spawn_furnace_deposit_cell(row, icons, FurnaceSlot::Fuel, ITEM_COAL);
                         });
-                    }
                 });
         });
+}
+
+fn spawn_furnace_slot_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    slot: FurnaceSlot,
+    label: &'static str,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Px(68.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|stack| {
+            stack.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.84, 0.8)),
+                hud_text_shadow(),
+            ));
+            stack
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(58.0),
+                        height: Val::Px(58.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        position_type: PositionType::Relative,
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    storage_cell_background(false, false),
+                    storage_cell_border(false),
+                    BorderRadius::all(Val::Px(5.0)),
+                    FurnaceSlotButton { slot },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        ImageNode::new(icons.empty.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        FurnaceSlotIcon { slot },
+                    ));
+                    button.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(5.0),
+                            bottom: Val::Px(3.0),
+                            ..default()
+                        },
+                        FurnaceSlotCountText { slot },
+                    ));
+                });
+        });
+}
+
+fn spawn_furnace_deposit_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    slot: FurnaceSlot,
+    item: ItemId,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            FurnaceDepositButton { slot, item },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                FurnaceDepositIcon { item },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                FurnaceDepositCountText { item },
+            ));
+        });
+}
+
+fn spawn_panel_section_label(parent: &mut ChildSpawnerCommands, label: &'static str) {
+    parent.spawn((
+        Text::new(label),
+        TextFont {
+            font_size: 14.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.82, 0.84, 0.8)),
+        hud_text_shadow(),
+    ));
+}
+
+fn storage_cell_background(occupied: bool, hovered: bool) -> BackgroundColor {
+    BackgroundColor(match (occupied, hovered) {
+        (true, true) => Color::srgba(0.16, 0.21, 0.15, 0.86),
+        (true, false) => Color::srgba(0.11, 0.15, 0.11, 0.78),
+        (false, true) => Color::srgba(0.11, 0.13, 0.11, 0.72),
+        (false, false) => Color::srgba(0.06, 0.08, 0.07, 0.62),
+    })
+}
+
+fn storage_cell_border(occupied: bool) -> BorderColor {
+    BorderColor(if occupied {
+        Color::srgba(0.82, 0.92, 0.76, 0.38)
+    } else {
+        Color::srgba(1.0, 1.0, 1.0, 0.12)
+    })
+}
+
+fn item_count_label(count: u32) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        count.to_string()
+    }
+}
+
+fn furnace_slot(furnace: Option<&FurnaceRecord>, slot: FurnaceSlot) -> Option<Slot> {
+    furnace.map(|furnace| match slot {
+        FurnaceSlot::Input => furnace.state.input,
+        FurnaceSlot::Fuel => furnace.state.fuel,
+        FurnaceSlot::Output => furnace.state.output,
+    })
 }
 
 fn world_runtime_frame_counter_system(mut runtime: ResMut<WorldRuntime>) {
@@ -1312,15 +2074,23 @@ fn ui_close_system(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut ui_state: ResMut<UiState>,
+    mut placement: ResMut<PlacementState>,
+    mut hotbar: ResMut<HotbarState>,
 ) {
     if keys.just_pressed(KeyCode::Escape) || buttons.just_pressed(MouseButton::Right) {
-        ui_state.mode = UiMode::None;
+        if ui_state.mode == UiMode::None {
+            placement.selected = None;
+            hotbar.selected_slot = None;
+        } else {
+            ui_state.mode = UiMode::None;
+        }
     }
 }
 
 fn ui_visibility_system(
     mut commands: Commands,
     ui_state: Res<UiState>,
+    icons: Res<UiIconAssets>,
     mut overlay_query: Query<&mut Visibility, With<UiOverlay>>,
     panel_query: Query<Entity, With<UiPanelRoot>>,
     children_query: Query<&Children, With<UiPanelRoot>>,
@@ -1355,19 +2125,19 @@ fn ui_visibility_system(
             *overlay_visibility = Visibility::Visible;
             commands
                 .entity(panel_entity)
-                .with_children(|parent| spawn_crafting_panel(parent));
+                .with_children(|parent| spawn_crafting_panel(parent, &icons));
         }
         UiMode::Chest { .. } => {
             *overlay_visibility = Visibility::Visible;
             commands
                 .entity(panel_entity)
-                .with_children(|parent| spawn_chest_panel(parent));
+                .with_children(|parent| spawn_chest_panel(parent, &icons));
         }
         UiMode::Furnace { .. } => {
             *overlay_visibility = Visibility::Visible;
             commands
                 .entity(panel_entity)
-                .with_children(|parent| spawn_furnace_panel(parent));
+                .with_children(|parent| spawn_furnace_panel(parent, &icons));
         }
     }
 }
@@ -1375,15 +2145,16 @@ fn ui_visibility_system(
 fn placement_select_system(
     keys: Res<ButtonInput<KeyCode>>,
     ui_state: Res<UiState>,
+    player: Res<PlayerState>,
     mut placement: ResMut<PlacementState>,
 ) {
     if ui_state.mode != UiMode::None {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KeyCode::KeyF) && player.inventory.count(ITEM_FURNACE) > 0 {
         placement.selected = Some(ITEM_FURNACE);
     }
-    if keys.just_pressed(KeyCode::KeyC) {
+    if keys.just_pressed(KeyCode::KeyC) && player.inventory.count(ITEM_CHEST) > 0 {
         placement.selected = Some(ITEM_CHEST);
     }
     if keys.just_pressed(KeyCode::Escape) {
@@ -1391,20 +2162,22 @@ fn placement_select_system(
     }
 }
 
-fn crafting_input_system(
+fn hotbar_input_system(
     keys: Res<ButtonInput<KeyCode>>,
     ui_state: Res<UiState>,
-    mut player: ResMut<PlayerState>,
+    player: Res<PlayerState>,
+    mut hotbar: ResMut<HotbarState>,
+    mut placement: ResMut<PlacementState>,
 ) {
-    if ui_state.mode != UiMode::Crafting {
+    if ui_state.mode != UiMode::None {
         return;
     }
 
-    if keys.just_pressed(KeyCode::Digit1) {
-        let _ = try_craft(&mut player.inventory, &RECIPE_FURNACE);
-    }
-    if keys.just_pressed(KeyCode::Digit2) {
-        let _ = try_craft(&mut player.inventory, &RECIPE_CHEST);
+    for (index, key) in HOTBAR_KEYS.into_iter().enumerate() {
+        if keys.just_pressed(key) {
+            select_hotbar_slot(index, &player.inventory, &mut hotbar, &mut placement);
+            break;
+        }
     }
 }
 
@@ -1426,6 +2199,7 @@ struct MiningParams<'w, 's> {
     runtime: ResMut<'w, WorldRuntime>,
     player: ResMut<'w, PlayerState>,
     player_query: Query<'w, 's, &'static Transform, With<Player>>,
+    hotbar_interactions: Query<'w, 's, &'static Interaction, With<HotbarSlotButton>>,
     placement: ResMut<'w, PlacementState>,
     ui_state: ResMut<'w, UiState>,
     images: ResMut<'w, Assets<Image>>,
@@ -1436,6 +2210,7 @@ struct MiningParams<'w, 's> {
     debug: Res<'w, DebugConfig>,
     highlight: ResMut<'w, ClickHighlight>,
     map: ResMut<'w, MapState>,
+    pickup_notices: EventWriter<'w, PickupNotice>,
 }
 
 fn mining_input_system(
@@ -1449,6 +2224,13 @@ fn mining_input_system(
         return;
     }
     if params.ui_state.mode != UiMode::None {
+        return;
+    }
+    if params
+        .hotbar_interactions
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
         return;
     }
     if log_mining {
@@ -1554,6 +2336,7 @@ fn mining_input_system(
         &params.time,
         &mut params.queue,
         &mut params.status,
+        &mut params.pickup_notices,
         log_mining,
         params.highlight.tile,
     );
@@ -1574,6 +2357,7 @@ fn mining_input_system(
                     &params.time,
                     &mut params.queue,
                     &mut params.status,
+                    &mut params.pickup_notices,
                     log_mining,
                     params.highlight.tile,
                 );
@@ -1602,6 +2386,19 @@ struct Recipe {
     inputs: &'static [(ItemId, u32)],
 }
 
+const INVENTORY_ITEMS: [ItemId; 8] = [
+    ITEM_STONE,
+    ITEM_COPPER_ORE,
+    ITEM_COAL,
+    ITEM_IRON_ORE,
+    ITEM_IRON_PLATE,
+    ITEM_COPPER_PLATE,
+    ITEM_FURNACE,
+    ITEM_CHEST,
+];
+
+const PLACEABLE_ITEMS: [ItemId; 2] = [ITEM_FURNACE, ITEM_CHEST];
+
 const RECIPE_FURNACE: Recipe = Recipe {
     output: ITEM_FURNACE,
     output_amount: 1,
@@ -1614,9 +2411,12 @@ const RECIPE_CHEST: Recipe = Recipe {
     inputs: &[(ITEM_STONE, 10)],
 };
 
+const RECIPES: [&Recipe; 2] = [&RECIPE_FURNACE, &RECIPE_CHEST];
+
 const FURNACE_PROGRESS_PER_ITEM: u16 = 1000;
 const FURNACE_SECONDS_PER_ITEM: f32 = 2.0;
 const FURNACE_PROGRESS_PER_SEC: f32 = FURNACE_PROGRESS_PER_ITEM as f32 / FURNACE_SECONDS_PER_ITEM;
+const FURNACE_PROGRESS_BAR_WIDTH: f32 = 252.0;
 
 fn smelt_output_for_input(item: ItemId) -> Option<ItemId> {
     match item {
@@ -1627,16 +2427,46 @@ fn smelt_output_for_input(item: ItemId) -> Option<ItemId> {
 }
 
 fn try_craft(inv: &mut Inventory, recipe: &Recipe) -> bool {
-    for (item, amount) in recipe.inputs {
-        if inv.count(*item) < *amount {
-            return false;
-        }
+    if !can_craft(inv, recipe) {
+        return false;
     }
     for (item, amount) in recipe.inputs {
         let _ = inv.try_remove(*item, *amount);
     }
     inv.add(recipe.output, recipe.output_amount);
     true
+}
+
+fn can_craft(inv: &Inventory, recipe: &Recipe) -> bool {
+    recipe
+        .inputs
+        .iter()
+        .all(|(item, amount)| inv.count(*item) >= *amount)
+}
+
+fn recipe_for_index(index: usize) -> Option<&'static Recipe> {
+    RECIPES.get(index).copied()
+}
+
+fn recipe_detail_label(recipe: &Recipe, inv: &Inventory) -> String {
+    let mut label = format!(
+        "{} x{}\n\nRequired:",
+        item_name(recipe.output),
+        recipe.output_amount
+    );
+    for (item, needed) in recipe.inputs {
+        let have = inv.count(*item);
+        label.push_str(&format!("\n{} {}/{}", item_name(*item), have, needed));
+    }
+    label
+}
+
+fn item_detail_label(item: ItemId, inv: &Inventory) -> String {
+    format!("{}\n\nIn inventory: {}", item_name(item), inv.count(item))
+}
+
+fn is_placeable_item(item: ItemId) -> bool {
+    item_to_placed_kind(item).is_some()
 }
 
 fn item_name(item: ItemId) -> &'static str {
@@ -1701,14 +2531,28 @@ fn try_mine_at_world_pos(
     time: &Time,
     queue: &mut SaveQueue,
     status: &mut StorageStatus,
+    pickup_notices: &mut EventWriter<PickupNotice>,
     log: bool,
     highlight: Option<(i32, i32)>,
 ) -> bool {
     let tile_x = (world_pos.x / config.tile_size).floor() as i32;
     let tile_y = (world_pos.y / config.tile_size).floor() as i32;
     let mined = try_mine_tile(
-        tile_x, tile_y, config, session, runtime, player, images, map, services, time, queue,
-        status, log, highlight,
+        tile_x,
+        tile_y,
+        config,
+        session,
+        runtime,
+        player,
+        images,
+        map,
+        services,
+        time,
+        queue,
+        status,
+        pickup_notices,
+        log,
+        highlight,
     )
     .is_mined();
     if log {
@@ -1733,6 +2577,7 @@ fn try_mine_tile(
     time: &Time,
     queue: &mut SaveQueue,
     status: &mut StorageStatus,
+    pickup_notices: &mut EventWriter<PickupNotice>,
     log: bool,
     highlight: Option<(i32, i32)>,
 ) -> MineAttempt {
@@ -1778,6 +2623,11 @@ fn try_mine_tile(
 
     if let Some(item) = resource_to_item(mined_kind) {
         player.inventory.add(item, 1);
+        pickup_notices.write(PickupNotice {
+            item,
+            amount: 1,
+            total: player.inventory.count(item),
+        });
     }
     runtime.touch(&key);
     refresh_chunk_texture(
@@ -1951,27 +2801,125 @@ fn try_place_tile(
     true
 }
 
-fn inventory_text_system(
-    player: Res<PlayerState>,
-    mut query: Query<&mut Text, With<InventoryText>>,
+fn select_hotbar_slot(
+    index: usize,
+    inventory: &Inventory,
+    hotbar: &mut HotbarState,
+    placement: &mut PlacementState,
 ) {
-    if !player.is_changed() {
+    let Some(item) = hotbar.slots.get(index).and_then(|slot| *slot) else {
+        hotbar.selected_slot = None;
+        placement.selected = None;
+        return;
+    };
+    if inventory.count(item) == 0 || !is_placeable_item(item) {
+        hotbar.selected_slot = None;
+        placement.selected = None;
         return;
     }
-    let inv = &player.inventory;
-    let label = format!(
-        "Inventory: Iron Ore {} | Copper Ore {} | Coal {} | Stone {}\nPlates: Iron {} | Copper {} | Furnace {} | Chest {}",
-        inv.count(ITEM_IRON_ORE),
-        inv.count(ITEM_COPPER_ORE),
-        inv.count(ITEM_COAL),
-        inv.count(ITEM_STONE),
-        inv.count(ITEM_IRON_PLATE),
-        inv.count(ITEM_COPPER_PLATE),
-        inv.count(ITEM_FURNACE),
-        inv.count(ITEM_CHEST),
-    );
-    for mut text in &mut query {
-        *text = Text::new(label.clone());
+
+    if hotbar.selected_slot == Some(index) {
+        hotbar.selected_slot = None;
+        placement.selected = None;
+    } else {
+        hotbar.selected_slot = Some(index);
+        placement.selected = Some(item);
+    }
+}
+
+fn hotbar_auto_assign_system(
+    player: Res<PlayerState>,
+    mut hotbar: ResMut<HotbarState>,
+    mut placement: ResMut<PlacementState>,
+) {
+    for item in PLACEABLE_ITEMS {
+        if player.inventory.count(item) > 0 {
+            hotbar.assign_item(item);
+        }
+    }
+
+    if let Some(slot) = hotbar.selected_slot {
+        let selected = hotbar.slots.get(slot).and_then(|slot| *slot);
+        match selected {
+            Some(item) if player.inventory.count(item) > 0 && is_placeable_item(item) => {
+                placement.selected = Some(item);
+            }
+            _ => {
+                hotbar.selected_slot = None;
+                placement.selected = None;
+            }
+        }
+    }
+}
+
+fn hotbar_button_system(
+    player: Res<PlayerState>,
+    mut hotbar: ResMut<HotbarState>,
+    mut placement: ResMut<PlacementState>,
+    mut query: Query<(&Interaction, &HotbarSlotButton), Changed<Interaction>>,
+) {
+    for (interaction, button) in &mut query {
+        if *interaction == Interaction::Pressed {
+            select_hotbar_slot(button.index, &player.inventory, &mut hotbar, &mut placement);
+        }
+    }
+}
+
+fn hotbar_ui_system(
+    player: Res<PlayerState>,
+    hotbar: Res<HotbarState>,
+    icons: Res<UiIconAssets>,
+    mut button_query: Query<(
+        &HotbarSlotButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut icon_query: Query<(&HotbarSlotIcon, &mut ImageNode)>,
+    mut count_query: Query<(&HotbarSlotCountText, &mut Text)>,
+) {
+    for (button, interaction, mut background, mut border) in &mut button_query {
+        let selected = hotbar.selected_slot == Some(button.index);
+        let occupied = hotbar.slots.get(button.index).and_then(|slot| *slot);
+        let count = occupied
+            .map(|item| player.inventory.count(item))
+            .unwrap_or(0);
+        *background = BackgroundColor(match (selected, *interaction) {
+            (true, _) => Color::srgba(0.15, 0.22, 0.14, 0.84),
+            (false, Interaction::Hovered) => Color::srgba(0.12, 0.15, 0.12, 0.82),
+            _ => Color::srgba(0.08, 0.11, 0.09, 0.72),
+        });
+        *border = BorderColor(if selected {
+            Color::srgb(0.98, 0.98, 0.95)
+        } else if occupied.is_some() && count > 0 {
+            Color::srgba(0.8, 0.92, 0.72, 0.36)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.16)
+        });
+    }
+
+    for (slot_icon, mut image) in &mut icon_query {
+        if let Some(item) = hotbar.slots.get(slot_icon.index).and_then(|slot| *slot) {
+            image.image = icons.for_item(item);
+            image.color = if player.inventory.count(item) > 0 {
+                Color::WHITE
+            } else {
+                Color::srgba(1.0, 1.0, 1.0, 0.35)
+            };
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_text, mut text) in &mut count_query {
+        let label = hotbar
+            .slots
+            .get(slot_text.index)
+            .and_then(|slot| *slot)
+            .map(|item| player.inventory.count(item).to_string())
+            .unwrap_or_default();
+        *text = Text::new(label);
     }
 }
 
@@ -1983,40 +2931,228 @@ fn craft_menu_text_system(
         return;
     }
     let label = if matches!(ui_state.mode, UiMode::Crafting) {
-        "Crafting (E to close)"
+        "Close Crafting"
     } else {
-        "Crafting (E to open)"
+        "Crafting"
     };
     for mut text in &mut query {
         *text = Text::new(label.to_string());
     }
 }
 
-fn placement_text_system(
-    player: Res<PlayerState>,
-    mut placement: ResMut<PlacementState>,
-    mut query: Query<&mut Text, With<PlacementText>>,
+fn inventory_cell_hover_system(
+    mut crafting_ui: ResMut<CraftingUiState>,
+    mut query: Query<(&Interaction, &InventoryCellButton), Changed<Interaction>>,
 ) {
-    if !player.is_changed() && !placement.is_changed() {
-        return;
-    }
-    if let Some(item) = placement.selected {
-        if player.inventory.count(item) == 0 {
-            placement.selected = None;
+    for (interaction, cell) in &mut query {
+        match *interaction {
+            Interaction::Hovered | Interaction::Pressed => {
+                crafting_ui.hovered_item = Some(cell.item);
+            }
+            Interaction::None if crafting_ui.hovered_item == Some(cell.item) => {
+                crafting_ui.hovered_item = None;
+            }
+            Interaction::None => {}
         }
     }
-    let label = if let Some(item) = placement.selected {
-        format!(
-            "Place: {} x{} (F furnace, C chest, Esc clear)",
-            item_name(item),
-            player.inventory.count(item)
-        )
+}
+
+fn crafting_recipe_button_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut player_mut: ResMut<PlayerState>,
+    mut crafting_ui: ResMut<CraftingUiState>,
+    mut hotbar: ResMut<HotbarState>,
+    mut query: Query<(&Interaction, &RecipeButton), Changed<Interaction>>,
+) {
+    for (interaction, button) in &mut query {
+        if *interaction == Interaction::Hovered || *interaction == Interaction::Pressed {
+            crafting_ui.focused_recipe = button.recipe_index;
+        }
+
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        let Some(recipe) = recipe_for_index(button.recipe_index) else {
+            continue;
+        };
+        let craft_many = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let mut crafted = 0u32;
+        if craft_many {
+            while try_craft(&mut player_mut.inventory, recipe) {
+                crafted += 1;
+                if crafted >= 999 {
+                    break;
+                }
+            }
+        } else if try_craft(&mut player_mut.inventory, recipe) {
+            crafted = 1;
+        }
+
+        if crafted > 0 {
+            hotbar.assign_item(recipe.output);
+        }
+    }
+}
+
+fn crafting_panel_text_system(
+    player: Res<PlayerState>,
+    crafting_ui: Res<CraftingUiState>,
+    mut text_queries: ParamSet<(
+        Query<(&InventoryItemCountText, &mut Text)>,
+        Query<&mut Text, With<RecipeDetailText>>,
+    )>,
+) {
+    for (count, mut text) in &mut text_queries.p0() {
+        *text = Text::new(player.inventory.count(count.item).to_string());
+    }
+
+    let label = if let Some(item) = crafting_ui.hovered_item {
+        item_detail_label(item, &player.inventory)
     } else {
-        "Place: None (F furnace, C chest, Esc clear)".to_string()
+        recipe_for_index(crafting_ui.focused_recipe)
+            .map(|recipe| recipe_detail_label(recipe, &player.inventory))
+            .unwrap_or_default()
     };
-    for mut text in &mut query {
+    for mut text in &mut text_queries.p1() {
         *text = Text::new(label.clone());
     }
+}
+
+fn crafting_recipe_visual_system(
+    player: Res<PlayerState>,
+    crafting_ui: Res<CraftingUiState>,
+    mut query: Query<(
+        &RecipeButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+) {
+    for (button, interaction, mut background, mut border) in &mut query {
+        let Some(recipe) = recipe_for_index(button.recipe_index) else {
+            continue;
+        };
+        let focused = crafting_ui.focused_recipe == button.recipe_index;
+        let can_craft = can_craft(&player.inventory, recipe);
+        *background = BackgroundColor(match (focused, *interaction, can_craft) {
+            (true, _, true) => Color::srgba(0.14, 0.22, 0.13, 0.86),
+            (true, _, false) => Color::srgba(0.2, 0.12, 0.1, 0.86),
+            (false, Interaction::Hovered, true) => Color::srgba(0.12, 0.16, 0.11, 0.82),
+            (false, Interaction::Hovered, false) => Color::srgba(0.14, 0.1, 0.09, 0.82),
+            _ => Color::srgba(0.08, 0.11, 0.09, 0.72),
+        });
+        *border = BorderColor(if focused {
+            Color::srgb(0.98, 0.98, 0.95)
+        } else if can_craft {
+            Color::srgba(0.76, 0.94, 0.66, 0.4)
+        } else {
+            Color::srgba(0.94, 0.5, 0.42, 0.32)
+        });
+    }
+}
+
+fn pickup_notice_spawn_system(
+    mut commands: Commands,
+    icons: Res<UiIconAssets>,
+    mut notices: EventReader<PickupNotice>,
+    root_query: Query<Entity, With<PickupFeedRoot>>,
+    mut toast_query: Query<(&mut PickupNoticeToast, &Children)>,
+    mut text_query: Query<&mut Text, With<PickupNoticeText>>,
+) {
+    let Ok(root) = root_query.single() else {
+        return;
+    };
+
+    for notice in notices.read() {
+        let label = pickup_notice_label(*notice);
+        let mut updated_existing = false;
+        for (mut toast, children) in &mut toast_query {
+            if toast.item != notice.item {
+                continue;
+            }
+
+            toast.timer = Timer::from_seconds(1.7, TimerMode::Once);
+            for child in children.iter() {
+                if let Ok(mut text) = text_query.get_mut(child) {
+                    *text = Text::new(label.clone());
+                    break;
+                }
+            }
+            updated_existing = true;
+            break;
+        }
+
+        if updated_existing {
+            continue;
+        }
+
+        commands.entity(root).with_children(|parent| {
+            parent
+                .spawn((
+                    Node {
+                        width: Val::Px(210.0),
+                        height: Val::Px(34.0),
+                        align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(Val::Px(8.0)),
+                        column_gap: Val::Px(8.0),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.06, 0.055, 0.045, 0.82)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    BorderRadius::all(Val::Px(6.0)),
+                    hud_shadow(),
+                    PickupNoticeToast {
+                        item: notice.item,
+                        timer: Timer::from_seconds(1.7, TimerMode::Once),
+                    },
+                ))
+                .with_children(|toast| {
+                    toast.spawn((
+                        ImageNode::new(icons.for_item(notice.item)),
+                        Node {
+                            width: Val::Px(22.0),
+                            height: Val::Px(22.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ));
+                    toast.spawn((
+                        Text::new(label),
+                        TextFont {
+                            font_size: 15.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.96, 0.94)),
+                        hud_text_shadow(),
+                        PickupNoticeText,
+                    ));
+                });
+        });
+    }
+}
+
+fn pickup_notice_lifetime_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut PickupNoticeToast)>,
+) {
+    for (entity, mut toast) in &mut query {
+        toast.timer.tick(time.delta());
+        if toast.timer.just_finished() {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn pickup_notice_label(notice: PickupNotice) -> String {
+    format!(
+        "+{} {} ({})",
+        notice.amount,
+        item_name(notice.item),
+        notice.total
+    )
 }
 
 fn minimap_visibility_system(
@@ -2201,8 +3337,8 @@ fn map_ui_render_system(
                 MINIMAP_PX_PER_TILE,
                 5.0,
                 Vec2::new(
-                    window_size.x - MINIMAP_MARGIN - MINIMAP_SIZE,
-                    window_size.y - MINIMAP_MARGIN - MINIMAP_SIZE,
+                    window_size.x - MINIMAP_MARGIN - MINIMAP_OUTER_SIZE + MINIMAP_FRAME,
+                    window_size.y - MINIMAP_MARGIN - MINIMAP_OUTER_SIZE + MINIMAP_FRAME,
                 ),
             ),
             MapSurfaceKind::Full => (
@@ -2230,7 +3366,14 @@ fn map_ui_render_system(
 
         clear_map_content(&mut commands, entity, &children_query);
         commands.entity(entity).with_children(|parent| {
-            spawn_map_chunk_nodes(parent, &map, center_tile, px_per_tile, viewport);
+            spawn_map_chunk_nodes(
+                parent,
+                &map,
+                center_tile,
+                px_per_tile,
+                viewport,
+                content.kind == MapSurfaceKind::Minimap,
+            );
             spawn_map_player_marker(
                 parent,
                 player_tile,
@@ -2249,50 +3392,171 @@ fn map_ui_render_system(
 fn chest_ui_system(
     ui_state: Res<UiState>,
     runtime: Res<WorldRuntime>,
-    mut slot_texts: Query<(&ChestSlotText, &mut Text)>,
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<
+        (
+            &ChestSlotButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<ChestDepositButton>,
+    >,
+    mut slot_icons: Query<(&ChestSlotIcon, &mut ImageNode), Without<ChestDepositIcon>>,
+    mut slot_counts: Query<(&ChestSlotCountText, &mut Text), Without<ChestDepositCountText>>,
+    mut deposit_buttons: Query<
+        (
+            &ChestDepositButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<ChestSlotButton>,
+    >,
+    mut deposit_icons: Query<(&ChestDepositIcon, &mut ImageNode), Without<ChestSlotIcon>>,
+    mut deposit_counts: Query<(&ChestDepositCountText, &mut Text), Without<ChestSlotCountText>>,
 ) {
     let UiMode::Chest { object_id } = ui_state.mode else {
         return;
     };
     let chest = find_chest(&runtime, object_id);
-    for (slot, mut text) in &mut slot_texts {
-        let label = match chest.and_then(|chest| chest.inv.slots.get(slot.index)) {
-            Some(slot) if !slot.is_empty() => {
-                format!("{} x{}", item_name(slot.item), slot.count)
-            }
-            _ => "Empty".to_string(),
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = chest
+            .and_then(|chest| chest.inv.slots.get(button.index))
+            .copied();
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        let slot = chest
+            .and_then(|chest| chest.inv.slots.get(slot_icon.index))
+            .copied();
+        if let Some(slot) = slot.filter(|slot| !slot.is_empty()) {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut slot_counts {
+        let count = chest
+            .and_then(|chest| chest.inv.slots.get(slot_count.index))
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut deposit_buttons {
+        let count = player.inventory.count(button.item);
+        let occupied = count > 0;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (deposit_icon, mut image) in &mut deposit_icons {
+        image.color = if player.inventory.count(deposit_icon.item) > 0 {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.32)
         };
-        *text = Text::new(label);
+    }
+
+    for (deposit_count, mut text) in &mut deposit_counts {
+        *text = Text::new(item_count_label(player.inventory.count(deposit_count.item)));
     }
 }
 
 fn furnace_ui_system(
     ui_state: Res<UiState>,
     runtime: Res<WorldRuntime>,
-    mut slot_texts: Query<(&FurnaceSlotText, &mut Text)>,
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<
+        (
+            &FurnaceSlotButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<FurnaceDepositButton>,
+    >,
+    mut slot_icons: Query<(&FurnaceSlotIcon, &mut ImageNode), Without<FurnaceDepositIcon>>,
+    mut slot_counts: Query<(&FurnaceSlotCountText, &mut Text), Without<FurnaceDepositCountText>>,
+    mut deposit_buttons: Query<
+        (
+            &FurnaceDepositButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<FurnaceSlotButton>,
+    >,
+    mut deposit_icons: Query<(&FurnaceDepositIcon, &mut ImageNode), Without<FurnaceSlotIcon>>,
+    mut deposit_counts: Query<(&FurnaceDepositCountText, &mut Text), Without<FurnaceSlotCountText>>,
     mut bar_query: Query<&mut Node, With<FurnaceProgressBar>>,
 ) {
     let UiMode::Furnace { object_id } = ui_state.mode else {
         return;
     };
     let furnace = find_furnace(&runtime, object_id);
-    for (slot, mut text) in &mut slot_texts {
-        let slot_ref = furnace.map(|furnace| match slot.slot {
-            FurnaceSlot::Input => furnace.state.input,
-            FurnaceSlot::Fuel => furnace.state.fuel,
-            FurnaceSlot::Output => furnace.state.output,
-        });
-        let label = match slot_ref {
-            Some(slot) if !slot.is_empty() => {
-                format!("{} x{}", item_name(slot.item), slot.count)
-            }
-            _ => "Empty".to_string(),
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = furnace_slot(furnace, button.slot);
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        if let Some(slot) = furnace_slot(furnace, slot_icon.slot).filter(|slot| !slot.is_empty()) {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut slot_counts {
+        let count = furnace_slot(furnace, slot_count.slot)
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut deposit_buttons {
+        let count = player.inventory.count(button.item);
+        let occupied = count > 0;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (deposit_icon, mut image) in &mut deposit_icons {
+        image.color = if player.inventory.count(deposit_icon.item) > 0 {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.32)
         };
-        *text = Text::new(label);
+    }
+
+    for (deposit_count, mut text) in &mut deposit_counts {
+        *text = Text::new(item_count_label(player.inventory.count(deposit_count.item)));
     }
     let width = furnace
         .map(|furnace| {
-            200.0
+            FURNACE_PROGRESS_BAR_WIDTH
                 * (furnace.state.progress as f32 / FURNACE_PROGRESS_PER_ITEM as f32).clamp(0.0, 1.0)
         })
         .unwrap_or(0.0);
@@ -3500,24 +4764,31 @@ fn spawn_map_chunk_nodes(
     center_tile: Vec2,
     px_per_tile: f32,
     viewport: Vec2,
+    snap_to_pixels: bool,
 ) {
     let chunk_tiles = CHUNK_EDGE as f32;
     let chunk_px = chunk_tiles * px_per_tile;
     for (key, chunk) in &map.explored {
         let min_x = key.coord.cx as f32 * chunk_tiles;
         let max_y = (key.coord.cy as f32 + 1.0) * chunk_tiles;
-        let left = viewport.x * 0.5 + (min_x - center_tile.x) * px_per_tile;
-        let top = viewport.y * 0.5 - (max_y - center_tile.y) * px_per_tile;
+        let mut left = viewport.x * 0.5 + (min_x - center_tile.x) * px_per_tile;
+        let mut top = viewport.y * 0.5 - (max_y - center_tile.y) * px_per_tile;
+        let mut size = chunk_px;
+        if snap_to_pixels {
+            left = left.round();
+            top = top.round();
+            size = chunk_px.round();
+        }
 
-        if left > viewport.x || top > viewport.y || left + chunk_px < 0.0 || top + chunk_px < 0.0 {
+        if left > viewport.x || top > viewport.y || left + size < 0.0 || top + size < 0.0 {
             continue;
         }
 
         parent.spawn((
             ImageNode::new(chunk.image.clone()),
             Node {
-                width: Val::Px(chunk_px),
-                height: Val::Px(chunk_px),
+                width: Val::Px(size),
+                height: Val::Px(size),
                 position_type: PositionType::Absolute,
                 left: Val::Px(left),
                 top: Val::Px(top),
@@ -3942,6 +5213,258 @@ fn object_id_for_tile(world_seed: u64, gx: i32, gy: i32, kind: PlacedId) -> Obje
     z ^= (gy as i64 as u64).wrapping_mul(0x94d049bb133111eb);
     let id = mix64(z);
     if id == 0 { 1 } else { id }
+}
+
+#[derive(Copy, Clone)]
+enum HudIconKind {
+    Empty,
+    Heart,
+    Stone,
+    CopperOre,
+    Coal,
+    IronOre,
+    IronPlate,
+    CopperPlate,
+    Furnace,
+    Chest,
+    Anvil,
+}
+
+fn build_hud_icon_image(kind: HudIconKind) -> Image {
+    let size = 16usize;
+    let mut pixels = vec![0u8; size * size * 4];
+
+    match kind {
+        HudIconKind::Empty => {}
+        HudIconKind::Heart => {
+            let mask = [
+                "0000000000000000",
+                "0001100001100000",
+                "0011110011110000",
+                "0111111111111000",
+                "0111111111111000",
+                "0011111111110000",
+                "0001111111100000",
+                "0000111111000000",
+                "0000011110000000",
+                "0000001100000000",
+                "0000000000000000",
+                "0000000000000000",
+                "0000000000000000",
+                "0000000000000000",
+                "0000000000000000",
+                "0000000000000000",
+            ];
+            paint_icon_mask(
+                &mut pixels,
+                size,
+                &mask,
+                [79, 231, 105, 255],
+                [21, 122, 42, 255],
+                [42, 184, 70, 255],
+            );
+        }
+        HudIconKind::Stone => {
+            let mask = rock_mask();
+            paint_icon_mask(
+                &mut pixels,
+                size,
+                &mask,
+                [142, 148, 151, 255],
+                [74, 80, 82, 255],
+                [177, 184, 186, 255],
+            );
+        }
+        HudIconKind::CopperOre => {
+            let mask = rock_mask();
+            paint_icon_mask(
+                &mut pixels,
+                size,
+                &mask,
+                [191, 116, 68, 255],
+                [104, 61, 38, 255],
+                [228, 151, 94, 255],
+            );
+        }
+        HudIconKind::Coal => {
+            let mask = rock_mask();
+            paint_icon_mask(
+                &mut pixels,
+                size,
+                &mask,
+                [42, 44, 48, 255],
+                [12, 13, 15, 255],
+                [70, 73, 80, 255],
+            );
+        }
+        HudIconKind::IronOre => {
+            let mask = rock_mask();
+            paint_icon_mask(
+                &mut pixels,
+                size,
+                &mask,
+                [111, 158, 186, 255],
+                [49, 76, 94, 255],
+                [165, 206, 226, 255],
+            );
+            set_icon_pixel(&mut pixels, size, 7, 4, [220, 238, 246, 255]);
+            set_icon_pixel(&mut pixels, size, 10, 7, [205, 229, 241, 255]);
+        }
+        HudIconKind::IronPlate => {
+            paint_plate_icon(
+                &mut pixels,
+                size,
+                [122, 156, 172, 255],
+                [58, 78, 88, 255],
+                [188, 214, 226, 255],
+            );
+        }
+        HudIconKind::CopperPlate => {
+            paint_plate_icon(
+                &mut pixels,
+                size,
+                [196, 113, 66, 255],
+                [105, 57, 35, 255],
+                [236, 158, 98, 255],
+            );
+        }
+        HudIconKind::Furnace => {
+            fill_icon_rect(&mut pixels, size, 3, 3, 12, 13, [68, 64, 58, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 4, 11, 12, [118, 112, 101, 255]);
+            fill_icon_rect(&mut pixels, size, 5, 7, 10, 11, [31, 27, 24, 255]);
+            fill_icon_rect(&mut pixels, size, 6, 8, 9, 11, [232, 104, 45, 255]);
+            fill_icon_rect(&mut pixels, size, 7, 8, 8, 10, [255, 188, 62, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 2, 11, 3, [47, 44, 40, 255]);
+        }
+        HudIconKind::Chest => {
+            fill_icon_rect(&mut pixels, size, 3, 5, 12, 12, [111, 72, 38, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 4, 11, 6, [155, 102, 53, 255]);
+            fill_icon_rect(&mut pixels, size, 3, 7, 12, 8, [81, 52, 29, 255]);
+            fill_icon_rect(&mut pixels, size, 7, 7, 8, 9, [218, 178, 83, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 10, 11, 12, [128, 81, 42, 255]);
+        }
+        HudIconKind::Anvil => {
+            fill_icon_rect(&mut pixels, size, 4, 3, 12, 5, [50, 53, 56, 255]);
+            fill_icon_rect(&mut pixels, size, 3, 4, 13, 6, [137, 141, 143, 255]);
+            fill_icon_rect(&mut pixels, size, 1, 5, 5, 7, [137, 141, 143, 255]);
+            fill_icon_rect(&mut pixels, size, 6, 7, 10, 10, [114, 118, 121, 255]);
+            fill_icon_rect(&mut pixels, size, 4, 11, 12, 13, [50, 53, 56, 255]);
+            fill_icon_rect(&mut pixels, size, 5, 11, 11, 12, [146, 151, 153, 255]);
+            set_icon_pixel(&mut pixels, size, 12, 3, [210, 213, 214, 255]);
+            set_icon_pixel(&mut pixels, size, 13, 4, [210, 213, 214, 255]);
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: size as u32,
+            height: size as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+fn rock_mask() -> [&'static str; 16] {
+    [
+        "0000000000000000",
+        "0000001110000000",
+        "0000111111100000",
+        "0001111111110000",
+        "0011111111111000",
+        "0011111111111000",
+        "0111111111110000",
+        "0011111111110000",
+        "0001111111100000",
+        "0000111111000000",
+        "0000011100000000",
+        "0000000000000000",
+        "0000000000000000",
+        "0000000000000000",
+        "0000000000000000",
+        "0000000000000000",
+    ]
+}
+
+fn paint_plate_icon(
+    pixels: &mut [u8],
+    size: usize,
+    fill: [u8; 4],
+    edge: [u8; 4],
+    highlight: [u8; 4],
+) {
+    fill_icon_rect(pixels, size, 3, 4, 12, 11, edge);
+    fill_icon_rect(pixels, size, 4, 3, 11, 10, fill);
+    fill_icon_rect(pixels, size, 5, 4, 10, 5, highlight);
+    fill_icon_rect(pixels, size, 4, 10, 11, 11, edge);
+}
+
+fn paint_icon_mask(
+    pixels: &mut [u8],
+    size: usize,
+    mask: &[&str; 16],
+    fill: [u8; 4],
+    edge: [u8; 4],
+    highlight: [u8; 4],
+) {
+    let is_filled = |x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 {
+            return false;
+        }
+        mask.get(y as usize)
+            .and_then(|row| row.as_bytes().get(x as usize))
+            .copied()
+            == Some(b'1')
+    };
+
+    for y in 0..size as i32 {
+        for x in 0..size as i32 {
+            if !is_filled(x, y) {
+                continue;
+            }
+            let is_edge = !is_filled(x - 1, y)
+                || !is_filled(x + 1, y)
+                || !is_filled(x, y - 1)
+                || !is_filled(x, y + 1);
+            let color = if is_edge {
+                edge
+            } else if (x + y * 2) % 7 == 0 {
+                highlight
+            } else {
+                fill
+            };
+            set_icon_pixel(pixels, size, x, y, color);
+        }
+    }
+}
+
+fn set_icon_pixel(pixels: &mut [u8], size: usize, x: i32, y: i32, color: [u8; 4]) {
+    if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 {
+        return;
+    }
+    let index = (y as usize * size + x as usize) * 4;
+    pixels[index..index + 4].copy_from_slice(&color);
+}
+
+fn fill_icon_rect(
+    pixels: &mut [u8],
+    size: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 4],
+) {
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            set_icon_pixel(pixels, size, x, y, color);
+        }
+    }
 }
 
 fn build_player_image() -> Image {
