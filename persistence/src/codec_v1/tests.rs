@@ -1,8 +1,9 @@
 use super::*;
 use crate::ChunkCodec;
 use simulation_core::{
-    CHUNK_TILE_COUNT, Entity, FurnaceSlot, ITEM_COAL, ITEM_IRON_ORE, ITEM_STONE, InserterDirection,
-    InserterInv, InserterRecord, PLACED_CHEST, PLACED_INSERTER, RES_IRON,
+    CHUNK_TILE_COUNT, DrillRecord, DrillState, Entity, FurnaceSlot, ITEM_COAL, ITEM_COPPER_ORE,
+    ITEM_IRON_ORE, ITEM_STONE, InserterDirection, InserterInv, InserterRecord, PLACED_CHEST,
+    PLACED_INSERTER, PLACED_MINING_DRILL, RES_IRON,
 };
 
 fn sample_chunk() -> SimChunkData {
@@ -35,6 +36,10 @@ fn sample_chunk() -> SimChunkData {
     placed[6] = PlacedCell {
         kind: PLACED_INSERTER,
         object_id: 101,
+    };
+    placed[7] = PlacedCell {
+        kind: PLACED_MINING_DRILL,
+        object_id: 102,
     };
 
     let mut chest_inv = ContainerInv::default();
@@ -83,6 +88,20 @@ fn sample_chunk() -> SimChunkData {
                 ],
             },
         }],
+        drills: vec![DrillRecord {
+            object_id: 102,
+            state: DrillState {
+                fuel: Slot {
+                    item: ITEM_COAL,
+                    count: 3,
+                },
+                output: Slot {
+                    item: ITEM_COPPER_ORE,
+                    count: 2,
+                },
+                progress: 77,
+            },
+        }],
         entities: vec![Entity {
             id: 7,
             kind: 2,
@@ -94,7 +113,7 @@ fn sample_chunk() -> SimChunkData {
 }
 
 #[test]
-fn round_trips_v6_chunk_payload() {
+fn round_trips_v7_chunk_payload() {
     let codec = ChunkCodecV1::default();
     let chunk = sample_chunk();
 
@@ -109,6 +128,7 @@ fn round_trips_v6_chunk_payload() {
     assert_eq!(decoded.chests, chunk.chests);
     assert_eq!(decoded.furnaces, chunk.furnaces);
     assert_eq!(decoded.inserters, chunk.inserters);
+    assert_eq!(decoded.drills, chunk.drills);
     assert_eq!(decoded.entities, chunk.entities);
     assert_eq!(decoded.saved_tick, 123);
 }

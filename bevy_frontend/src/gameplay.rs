@@ -24,13 +24,18 @@ impl Plugin for FoundryGameplayPlugin {
             (
                 chest_button_system,
                 furnace_button_system,
+                drill_button_system,
                 inserter_button_system,
             )
                 .in_set(UpdateSet::Ui),
         )
         .add_systems(
             Update,
-            (furnace_smelting_system, inserter_transfer_system)
+            (
+                furnace_smelting_system,
+                mining_drill_system,
+                inserter_transfer_system,
+            )
                 .chain()
                 .in_set(UpdateSet::World),
         );
@@ -54,6 +59,9 @@ pub(crate) fn placement_select_system(
     }
     if keys.just_pressed(KeyCode::KeyI) && player.inventory.count(ITEM_INSERTER) > 0 {
         placement.selected = Some(ITEM_INSERTER);
+    }
+    if keys.just_pressed(KeyCode::KeyD) && player.inventory.count(ITEM_MINING_DRILL) > 0 {
+        placement.selected = Some(ITEM_MINING_DRILL);
     }
     if keys.just_pressed(KeyCode::KeyR) && placement.selected == Some(ITEM_INSERTER) {
         placement.inserter_direction = placement.inserter_direction.next_clockwise();
@@ -263,6 +271,7 @@ pub(crate) fn mining_input_system(
 }
 
 pub(crate) const FURNACE_PROGRESS_BAR_WIDTH: f32 = 252.0;
+pub(crate) const MINING_DRILL_PROGRESS_BAR_WIDTH: f32 = 252.0;
 
 pub(crate) fn recipe_detail_label(recipe: &Recipe, inv: &Inventory) -> String {
     let mut label = format!(
@@ -523,6 +532,16 @@ fn collect_structure_pickup_items(
                 push_slot_pickup(&mut pickups, slot);
             }
         }
+    } else if kind == PLACED_MINING_DRILL {
+        if let Some(index) = data
+            .drills
+            .iter()
+            .position(|drill| drill.object_id == object_id)
+        {
+            let drill = data.drills.remove(index);
+            push_slot_pickup(&mut pickups, drill.state.fuel);
+            push_slot_pickup(&mut pickups, drill.state.output);
+        }
     }
 
     pickups
@@ -535,6 +554,7 @@ fn push_slot_pickup(pickups: &mut Vec<(ItemId, u32)>, slot: Slot) {
 }
 
 const INSERTER_FUEL_BUFFER: u32 = 4;
+const DRILL_FUEL_BUFFER: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InserterTile {
@@ -550,6 +570,7 @@ pub(crate) struct InserterTile {
 pub(crate) enum TransferEndpoint {
     Chest { object_id: ObjectId },
     Furnace { object_id: ObjectId },
+    Drill { object_id: ObjectId },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -561,6 +582,9 @@ pub(crate) enum TransferSource {
     FurnaceOutput {
         object_id: ObjectId,
     },
+    DrillOutput {
+        object_id: ObjectId,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -568,6 +592,7 @@ pub(crate) enum TransferTarget {
     Chest { object_id: ObjectId },
     FurnaceInput { object_id: ObjectId },
     FurnaceFuel { object_id: ObjectId },
+    DrillFuel { object_id: ObjectId },
 }
 
 pub(crate) fn inserter_transfer_system(
@@ -691,6 +716,9 @@ pub(crate) fn transfer_endpoint_at(
         PLACED_FURNACE if cell.object_id != 0 => Some(TransferEndpoint::Furnace {
             object_id: cell.object_id,
         }),
+        PLACED_MINING_DRILL if cell.object_id != 0 => Some(TransferEndpoint::Drill {
+            object_id: cell.object_id,
+        }),
         _ => None,
     }
 }
@@ -756,6 +784,18 @@ fn best_target_for_item(
                 return Some(target);
             }
         }
+        for endpoint in endpoints {
+            if Some(*endpoint) == exclude {
+                continue;
+            }
+            let TransferEndpoint::Drill { object_id } = *endpoint else {
+                continue;
+            };
+            let target = TransferTarget::DrillFuel { object_id };
+            if target_can_accept(runtime, target, item) {
+                return Some(target);
+            }
+        }
     }
 
     if smelt_output_for_input(item).is_some() {
@@ -805,6 +845,18 @@ fn best_pull_source(
                 && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
             {
                 return Some(TransferSource::FurnaceOutput { object_id });
+            }
+        }
+    }
+
+    if let TransferEndpoint::Drill { object_id } = source_endpoint {
+        if let Some(drill) = find_drill(runtime, object_id) {
+            let output = drill.state.output;
+            if !output.is_empty()
+                && inserter_can_accept(runtime, inserter_id, output.item)
+                && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
+            {
+                return Some(TransferSource::DrillOutput { object_id });
             }
         }
     }
@@ -876,6 +928,18 @@ fn target_can_accept(runtime: &WorldRuntime, target: TransferTarget, item: ItemI
                     slot_can_accept(furnace.state.fuel, item)
                         && (furnace.state.fuel.is_empty()
                             || furnace.state.fuel.count < INSERTER_FUEL_BUFFER)
+                })
+                .unwrap_or(false)
+        }
+        TransferTarget::DrillFuel { object_id } => {
+            if item != ITEM_COAL {
+                return false;
+            }
+            find_drill(runtime, object_id)
+                .map(|drill| {
+                    slot_can_accept(drill.state.fuel, item)
+                        && (drill.state.fuel.is_empty()
+                            || drill.state.fuel.count < DRILL_FUEL_BUFFER)
                 })
                 .unwrap_or(false)
         }
@@ -989,6 +1053,10 @@ fn take_from_transfer_source(
             })
             .and_then(|(key, _, slot)| slot.map(|slot| (key, slot)))
         }
+        TransferSource::DrillOutput { object_id } => with_drill_mut(runtime, object_id, |data| {
+            take_from_drill(&mut data.drills, object_id, DrillSlot::Output, 1)
+        })
+        .and_then(|(key, _, slot)| slot.map(|slot| (key, slot))),
     }
 }
 
@@ -1018,6 +1086,15 @@ fn deposit_to_transfer_target(
             }
             with_furnace_mut(runtime, object_id, |data| {
                 deposit_to_furnace_fuel(&mut data.furnaces, object_id, item, amount)
+            })
+            .map(|(key, _, moved)| (key, moved))
+        }
+        TransferTarget::DrillFuel { object_id } => {
+            if item != ITEM_COAL {
+                return None;
+            }
+            with_drill_mut(runtime, object_id, |data| {
+                deposit_to_drill_fuel(&mut data.drills, object_id, item, amount)
             })
             .map(|(key, _, moved)| (key, moved))
         }
@@ -1065,6 +1142,18 @@ fn restore_transfer_source(runtime: &mut WorldRuntime, source: TransferSource, s
                     return 0;
                 };
                 deposit_to_slot_unchecked(&mut furnace.state.output, slot.item, slot.count)
+            });
+        }
+        TransferSource::DrillOutput { object_id } => {
+            let _ = with_drill_mut(runtime, object_id, |data| {
+                let Some(drill) = data
+                    .drills
+                    .iter_mut()
+                    .find(|drill| drill.object_id == object_id)
+                else {
+                    return 0;
+                };
+                deposit_to_slot_unchecked(&mut drill.state.output, slot.item, slot.count)
             });
         }
     }
@@ -1341,6 +1430,20 @@ pub(crate) fn try_place_tile(
         if is_water(tile) {
             return false;
         }
+        if placed_kind == PLACED_MINING_DRILL {
+            let resource = loaded
+                .data
+                .resources
+                .get(idx)
+                .copied()
+                .unwrap_or(ResourceCell {
+                    kind: RES_NONE,
+                    amount: 0,
+                });
+            if resource.kind == RES_NONE || resource.amount == 0 {
+                return false;
+            }
+        }
         let Some(cell) = loaded.data.placed.get_mut(idx) else {
             return false;
         };
@@ -1388,6 +1491,18 @@ pub(crate) fn try_place_tile(
                     object_id,
                     direction: inserter_direction,
                     inv: InserterInv::default(),
+                });
+            }
+        } else if placed_kind == PLACED_MINING_DRILL {
+            if !loaded
+                .data
+                .drills
+                .iter()
+                .any(|drill| drill.object_id == object_id)
+            {
+                loaded.data.drills.push(DrillRecord {
+                    object_id,
+                    state: DrillState::default(),
                 });
             }
         }
@@ -1598,6 +1713,77 @@ pub(crate) fn furnace_button_system(
     }
 }
 
+pub(crate) fn drill_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &DrillSlotButton), Changed<Interaction>>,
+    mut deposit_buttons: Query<(&Interaction, &DrillDepositButton), Changed<Interaction>>,
+) {
+    let UiMode::MiningDrill { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let result = with_drill_mut(&mut runtime, object_id, |data| {
+            take_from_drill(&mut data.drills, object_id, button.slot, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+
+    for (interaction, button) in &mut deposit_buttons {
+        if *interaction != Interaction::Pressed || button.item != ITEM_COAL {
+            continue;
+        }
+        let amount = player.inventory.count(button.item);
+        if amount == 0 {
+            continue;
+        }
+        let result = with_drill_mut(&mut runtime, object_id, |data| {
+            deposit_to_drill_fuel(&mut data.drills, object_id, button.item, amount)
+        });
+        if let Some((key, snapshot, moved)) = result {
+            if moved > 0 {
+                let _ = player.inventory.try_remove(button.item, moved);
+                runtime.touch(&key);
+                queue_chunk_save(
+                    &key,
+                    &snapshot,
+                    &services,
+                    &session,
+                    &time,
+                    &mut runtime,
+                    &mut queue,
+                    &mut status,
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn inserter_button_system(
     ui_state: Res<UiState>,
     mut runtime: ResMut<WorldRuntime>,
@@ -1736,4 +1922,163 @@ pub(crate) fn furnace_smelting_system(
             );
         }
     }
+}
+
+pub(crate) fn mining_drill_system(
+    time: Res<Time>,
+    mut runtime: ResMut<WorldRuntime>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    config: Res<WorldRenderConfig>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut images: ResMut<Assets<Image>>,
+    mut map: ResMut<MapState>,
+    highlight: Res<ClickHighlight>,
+) {
+    let delta = time.delta_secs();
+    if delta <= 0.0 {
+        return;
+    }
+
+    let mut changed_chunks = Vec::new();
+
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        let drill_tiles = drill_tiles_in_chunk(&loaded.data);
+        if drill_tiles.is_empty() {
+            continue;
+        }
+
+        let mut mined_in_chunk = false;
+        for (resource_idx, drill_idx) in drill_tiles {
+            mined_in_chunk |=
+                advance_mining_drill(&mut loaded.data, resource_idx, drill_idx, delta);
+        }
+
+        if mined_in_chunk {
+            changed_chunks.push((
+                key.clone(),
+                loaded.texture_handle.clone(),
+                loaded.data.clone(),
+            ));
+        }
+    }
+
+    for (key, texture_handle, snapshot) in changed_chunks {
+        runtime.touch(&key);
+        refresh_chunk_texture(
+            &mut images,
+            &texture_handle,
+            &snapshot,
+            &config,
+            session.world_seed,
+            highlight.tile,
+        );
+        upsert_map_snapshot(
+            &mut map,
+            &mut images,
+            &key,
+            &snapshot,
+            session.world_seed,
+            time.elapsed().as_millis() as u64,
+        );
+        queue_chunk_save(
+            &key,
+            &snapshot,
+            &services,
+            &session,
+            &time,
+            &mut runtime,
+            &mut queue,
+            &mut status,
+        );
+    }
+}
+
+fn drill_tiles_in_chunk(data: &SimChunkData) -> Vec<(usize, usize)> {
+    data.placed
+        .iter()
+        .enumerate()
+        .filter_map(|(resource_idx, placed)| {
+            if placed.kind != PLACED_MINING_DRILL || placed.object_id == 0 {
+                return None;
+            }
+            let drill_idx = data
+                .drills
+                .iter()
+                .position(|drill| drill.object_id == placed.object_id)?;
+            Some((resource_idx, drill_idx))
+        })
+        .collect()
+}
+
+fn advance_mining_drill(
+    data: &mut SimChunkData,
+    resource_idx: usize,
+    drill_idx: usize,
+    delta: f32,
+) -> bool {
+    let Some(resource) = data.resources.get_mut(resource_idx) else {
+        return false;
+    };
+    let Some(drill) = data.drills.get_mut(drill_idx) else {
+        return false;
+    };
+    let Some(output_item) = resource_to_item(resource.kind) else {
+        drill.state.progress = 0;
+        return false;
+    };
+
+    let can_mine = resource.amount > 0
+        && drill.state.fuel.item == ITEM_COAL
+        && drill.state.fuel.count > 0
+        && (drill.state.output.is_empty() || drill.state.output.item == output_item);
+    if !can_mine {
+        drill.state.progress = 0;
+        return false;
+    }
+
+    let mut mined = false;
+    let mut progress = drill.state.progress as f32 + delta * MINING_DRILL_PROGRESS_PER_SEC;
+
+    while progress >= MINING_DRILL_PROGRESS_PER_ITEM as f32 {
+        if resource.amount == 0
+            || drill.state.fuel.is_empty()
+            || (!drill.state.output.is_empty() && drill.state.output.item != output_item)
+        {
+            break;
+        }
+
+        drill.state.fuel.count = drill.state.fuel.count.saturating_sub(1);
+        if drill.state.fuel.count == 0 {
+            drill.state.fuel.clear();
+        }
+
+        resource.amount = resource.amount.saturating_sub(1);
+        if resource.amount == 0 {
+            resource.kind = RES_NONE;
+        }
+
+        if drill.state.output.is_empty() {
+            drill.state.output.item = output_item;
+            drill.state.output.count = 1;
+        } else {
+            drill.state.output.count = drill.state.output.count.saturating_add(1);
+        }
+
+        mined = true;
+        progress -= MINING_DRILL_PROGRESS_PER_ITEM as f32;
+    }
+
+    let still_can_mine = resource.amount > 0
+        && drill.state.fuel.item == ITEM_COAL
+        && drill.state.fuel.count > 0
+        && (drill.state.output.is_empty() || drill.state.output.item == output_item);
+    drill.state.progress = if still_can_mine {
+        progress.min(MINING_DRILL_PROGRESS_PER_ITEM as f32) as u16
+    } else {
+        0
+    };
+
+    mined
 }

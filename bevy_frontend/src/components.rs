@@ -168,6 +168,42 @@ pub(crate) struct FurnaceDepositCountText {
 pub(crate) struct FurnaceProgressBar;
 
 #[derive(Component)]
+pub(crate) struct DrillPanel;
+
+#[derive(Component)]
+pub(crate) struct DrillSlotButton {
+    pub(crate) slot: DrillSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillSlotIcon {
+    pub(crate) slot: DrillSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillSlotCountText {
+    pub(crate) slot: DrillSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillDepositButton {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillDepositIcon {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillDepositCountText {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct DrillProgressBar;
+
+#[derive(Component)]
 pub(crate) struct InserterPanel;
 
 #[derive(Component)]

@@ -34,6 +34,7 @@ impl Plugin for FoundryUiPlugin {
                     pickup_notice_lifetime_system,
                     chest_ui_system,
                     furnace_ui_system,
+                    drill_ui_system,
                     inserter_ui_system,
                 )
                     .in_set(UpdateSet::Ui),
@@ -163,6 +164,7 @@ pub(crate) fn build_ui_icon_assets(
         furnace: asset_server.load("sprites/items/furnace.png"),
         chest: asset_server.load("sprites/items/chest.png"),
         inserter: asset_server.load("sprites/items/inserter.png"),
+        mining_drill: asset_server.load("sprites/items/mining_drill.png"),
         crafting: asset_server.load("sprites/ui/crafting.png"),
     }
 }
@@ -1241,6 +1243,215 @@ pub(crate) fn spawn_furnace_deposit_cell(
         });
 }
 
+pub(crate) fn spawn_drill_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(360.0),
+                max_width: Val::Percent(92.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            DrillPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Mining Drill"),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
+            ));
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    column_gap: Val::Px(18.0),
+                    ..default()
+                })
+                .with_children(|slots| {
+                    spawn_drill_slot_cell(slots, icons, DrillSlot::Fuel, "Fuel");
+                    spawn_drill_slot_cell(slots, icons, DrillSlot::Output, "Output");
+                });
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(MINING_DRILL_PROGRESS_BAR_WIDTH),
+                        height: Val::Px(10.0),
+                        align_self: AlignSelf::Center,
+                        overflow: Overflow::clip(),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.035, 0.78)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Px(0.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.32, 0.78, 0.28)),
+                        DrillProgressBar,
+                    ));
+                });
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|section| {
+                    spawn_panel_section_label(section, "Inventory");
+                    section
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_drill_deposit_cell(row, icons, ITEM_COAL);
+                        });
+                });
+        });
+}
+
+pub(crate) fn spawn_drill_slot_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    slot: DrillSlot,
+    label: &'static str,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Px(68.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|stack| {
+            stack.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.84, 0.8)),
+                hud_text_shadow(),
+            ));
+            stack
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(58.0),
+                        height: Val::Px(58.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        position_type: PositionType::Relative,
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    storage_cell_background(false, false),
+                    storage_cell_border(false),
+                    BorderRadius::all(Val::Px(5.0)),
+                    DrillSlotButton { slot },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        ImageNode::new(icons.empty.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        DrillSlotIcon { slot },
+                    ));
+                    button.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(5.0),
+                            bottom: Val::Px(3.0),
+                            ..default()
+                        },
+                        DrillSlotCountText { slot },
+                    ));
+                });
+        });
+}
+
+pub(crate) fn spawn_drill_deposit_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    item: ItemId,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            DrillDepositButton { item },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                DrillDepositIcon { item },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                DrillDepositCountText { item },
+            ));
+        });
+}
+
 pub(crate) fn spawn_inserter_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
     parent
         .spawn((
@@ -1403,6 +1614,13 @@ pub(crate) fn furnace_slot(furnace: Option<&FurnaceRecord>, slot: FurnaceSlot) -
     })
 }
 
+pub(crate) fn drill_slot(drill: Option<&DrillRecord>, slot: DrillSlot) -> Option<Slot> {
+    drill.map(|drill| match slot {
+        DrillSlot::Fuel => drill.state.fuel,
+        DrillSlot::Output => drill.state.output,
+    })
+}
+
 pub(crate) fn craft_menu_toggle_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<UiState>,
@@ -1491,6 +1709,12 @@ pub(crate) fn ui_visibility_system(
             commands
                 .entity(panel_entity)
                 .with_children(|parent| spawn_inserter_panel(parent, &icons));
+        }
+        UiMode::MiningDrill { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_drill_panel(parent, &icons));
         }
     }
 }
@@ -2133,6 +2357,98 @@ pub(crate) fn furnace_ui_system(
         .map(|furnace| {
             FURNACE_PROGRESS_BAR_WIDTH
                 * (furnace.state.progress as f32 / FURNACE_PROGRESS_PER_ITEM as f32).clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.0);
+    for mut node in &mut bar_query {
+        node.width = Val::Px(width);
+    }
+}
+
+pub(crate) fn drill_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<
+        (
+            &DrillSlotButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<DrillDepositButton>,
+    >,
+    mut slot_icons: Query<(&DrillSlotIcon, &mut ImageNode), Without<DrillDepositIcon>>,
+    mut slot_counts: Query<(&DrillSlotCountText, &mut Text), Without<DrillDepositCountText>>,
+    mut deposit_buttons: Query<
+        (
+            &DrillDepositButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<DrillSlotButton>,
+    >,
+    mut deposit_icons: Query<(&DrillDepositIcon, &mut ImageNode), Without<DrillSlotIcon>>,
+    mut deposit_counts: Query<(&DrillDepositCountText, &mut Text), Without<DrillSlotCountText>>,
+    mut bar_query: Query<&mut Node, With<DrillProgressBar>>,
+) {
+    let UiMode::MiningDrill { object_id } = ui_state.mode else {
+        return;
+    };
+    let drill = find_drill(&runtime, object_id);
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = drill_slot(drill, button.slot);
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        if let Some(slot) = drill_slot(drill, slot_icon.slot).filter(|slot| !slot.is_empty()) {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut slot_counts {
+        let count = drill_slot(drill, slot_count.slot)
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut deposit_buttons {
+        let count = player.inventory.count(button.item);
+        let occupied = count > 0;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (deposit_icon, mut image) in &mut deposit_icons {
+        image.color = if player.inventory.count(deposit_icon.item) > 0 {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.32)
+        };
+    }
+
+    for (deposit_count, mut text) in &mut deposit_counts {
+        *text = Text::new(item_count_label(player.inventory.count(deposit_count.item)));
+    }
+
+    let width = drill
+        .map(|drill| {
+            MINING_DRILL_PROGRESS_BAR_WIDTH
+                * (drill.state.progress as f32 / MINING_DRILL_PROGRESS_PER_ITEM as f32)
+                    .clamp(0.0, 1.0)
         })
         .unwrap_or(0.0);
     for mut node in &mut bar_query {

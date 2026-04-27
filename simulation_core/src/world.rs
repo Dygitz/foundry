@@ -1,4 +1,4 @@
-use crate::{ChestRecord, FurnaceRecord, InserterRecord};
+use crate::{ChestRecord, DrillRecord, FurnaceRecord, InserterRecord};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkCoord {
@@ -33,6 +33,7 @@ pub const PLACED_NONE: PlacedId = 0;
 pub const PLACED_FURNACE: PlacedId = 1;
 pub const PLACED_CHEST: PlacedId = 2;
 pub const PLACED_INSERTER: PlacedId = 3;
+pub const PLACED_MINING_DRILL: PlacedId = 4;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ResourceCell {
@@ -64,6 +65,7 @@ pub struct SimChunkData {
     pub chests: Vec<ChestRecord>,
     pub furnaces: Vec<FurnaceRecord>,
     pub inserters: Vec<InserterRecord>,
+    pub drills: Vec<DrillRecord>,
     pub entities: Vec<Entity>,
     pub saved_tick: u64,
 }
@@ -78,6 +80,7 @@ pub struct SimChunkView<'a> {
     pub chests: &'a [ChestRecord],
     pub furnaces: &'a [FurnaceRecord],
     pub inserters: &'a [InserterRecord],
+    pub drills: &'a [DrillRecord],
     pub entities: &'a [Entity],
 }
 
@@ -92,6 +95,7 @@ impl<'a> SimChunkView<'a> {
             chests: &data.chests,
             furnaces: &data.furnaces,
             inserters: &data.inserters,
+            drills: &data.drills,
             entities: &data.entities,
         }
     }

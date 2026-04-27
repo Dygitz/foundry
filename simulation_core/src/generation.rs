@@ -40,6 +40,7 @@ pub fn generate_chunk_data(
         chests: Vec::new(),
         furnaces: Vec::new(),
         inserters: Vec::new(),
+        drills: Vec::new(),
         entities: Vec::new(),
         saved_tick,
     }

@@ -1,4 +1,4 @@
-use crate::{ITEM_NONE, ItemId, ObjectId};
+use crate::{ITEM_COAL, ITEM_NONE, ItemId, ObjectId};
 
 pub const CHEST_SLOT_COUNT: usize = 16;
 pub const INSERTER_SLOT_COUNT: usize = 4;
@@ -163,6 +163,29 @@ pub struct FurnaceRecord {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DrillState {
+    pub fuel: Slot,
+    pub output: Slot,
+    pub progress: u16,
+}
+
+impl Default for DrillState {
+    fn default() -> Self {
+        Self {
+            fuel: Slot::default(),
+            output: Slot::default(),
+            progress: 0,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DrillRecord {
+    pub object_id: ObjectId,
+    pub state: DrillState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct InserterRecord {
     pub object_id: ObjectId,
     pub direction: InserterDirection,
@@ -172,6 +195,12 @@ pub struct InserterRecord {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FurnaceSlot {
     Input,
+    Fuel,
+    Output,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DrillSlot {
     Fuel,
     Output,
 }
@@ -285,6 +314,38 @@ pub fn deposit_to_furnace_fuel(
         return 0;
     };
     deposit_to_slot(&mut furnace.state.fuel, item, amount)
+}
+
+pub fn take_from_drill(
+    drills: &mut [DrillRecord],
+    object_id: ObjectId,
+    slot_kind: DrillSlot,
+    amount: u32,
+) -> Option<Slot> {
+    let drill = drills
+        .iter_mut()
+        .find(|drill| drill.object_id == object_id)?;
+    let slot = match slot_kind {
+        DrillSlot::Fuel => &mut drill.state.fuel,
+        DrillSlot::Output => &mut drill.state.output,
+    };
+    take_from_slot(slot, amount)
+}
+
+pub fn deposit_to_drill_fuel(
+    drills: &mut [DrillRecord],
+    object_id: ObjectId,
+    item: ItemId,
+    amount: u32,
+) -> u32 {
+    if item != ITEM_COAL {
+        return 0;
+    }
+    let drill = drills.iter_mut().find(|drill| drill.object_id == object_id);
+    let Some(drill) = drill else {
+        return 0;
+    };
+    deposit_to_slot(&mut drill.state.fuel, item, amount)
 }
 
 pub fn take_from_inserter(

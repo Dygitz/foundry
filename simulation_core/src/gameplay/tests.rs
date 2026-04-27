@@ -34,13 +34,35 @@ fn inserter_recipe_uses_smelted_plates() {
 }
 
 #[test]
+fn mining_drill_recipe_uses_smelted_plates_and_stone() {
+    let mut inv = Inventory::default();
+    inv.add(ITEM_IRON_PLATE, 3);
+    inv.add(ITEM_COPPER_PLATE, 1);
+    inv.add(ITEM_STONE, 5);
+
+    assert!(try_craft(&mut inv, &RECIPE_MINING_DRILL));
+    assert_eq!(inv.count(ITEM_IRON_PLATE), 0);
+    assert_eq!(inv.count(ITEM_COPPER_PLATE), 0);
+    assert_eq!(inv.count(ITEM_STONE), 0);
+    assert_eq!(inv.count(ITEM_MINING_DRILL), 1);
+}
+
+#[test]
 fn placement_and_smelt_rules_match_item_catalog() {
     assert_eq!(item_to_placed_kind(ITEM_FURNACE), Some(PLACED_FURNACE));
     assert_eq!(item_to_placed_kind(ITEM_CHEST), Some(PLACED_CHEST));
     assert_eq!(item_to_placed_kind(ITEM_INSERTER), Some(PLACED_INSERTER));
+    assert_eq!(
+        item_to_placed_kind(ITEM_MINING_DRILL),
+        Some(PLACED_MINING_DRILL)
+    );
     assert_eq!(placed_kind_to_item(PLACED_FURNACE), Some(ITEM_FURNACE));
     assert_eq!(placed_kind_to_item(PLACED_CHEST), Some(ITEM_CHEST));
     assert_eq!(placed_kind_to_item(PLACED_INSERTER), Some(ITEM_INSERTER));
+    assert_eq!(
+        placed_kind_to_item(PLACED_MINING_DRILL),
+        Some(ITEM_MINING_DRILL)
+    );
     assert_eq!(item_to_placed_kind(ITEM_STONE), None);
     assert_eq!(placed_kind_to_item(PLACED_NONE), None);
     assert_eq!(smelt_output_for_input(ITEM_IRON_ORE), Some(ITEM_IRON_PLATE));

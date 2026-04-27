@@ -485,6 +485,7 @@ pub(crate) fn placed_color(kind: PlacedId) -> [u8; 4] {
         PLACED_FURNACE => [90, 90, 100, 255],
         PLACED_CHEST => [150, 95, 55, 255],
         PLACED_INSERTER => [216, 168, 54, 255],
+        PLACED_MINING_DRILL => [92, 118, 126, 255],
         _ => [0, 0, 0, 0],
     }
 }

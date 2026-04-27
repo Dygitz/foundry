@@ -1,14 +1,14 @@
 use crate::errors::{Result, StorageError};
 use crate::traits::ChunkCodec;
 use simulation_core::{
-    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, ChestRecord, ChunkCoord, ContainerInv, Entity,
-    FurnaceRecord, FurnaceState, INSERTER_SLOT_COUNT, InserterDirection, InserterInv,
-    InserterRecord, PLACED_NONE, PlacedCell, RES_NONE, ResourceCell, SimChunkData, SimChunkView,
-    Slot, TileId,
+    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, ChestRecord, ChunkCoord, ContainerInv,
+    DrillRecord, DrillState, Entity, FurnaceRecord, FurnaceState, INSERTER_SLOT_COUNT,
+    InserterDirection, InserterInv, InserterRecord, PLACED_NONE, PlacedCell, RES_NONE,
+    ResourceCell, SimChunkData, SimChunkView, Slot, TileId,
 };
 
 const MAGIC: [u8; 4] = *b"CHNK";
-const FORMAT_VERSION: u16 = 6;
+const FORMAT_VERSION: u16 = 7;
 const FLAGS_NONE: u16 = 0;
 const BYTES_PER_ENTITY: usize = 12;
 const BYTES_PER_RESOURCE: usize = 3;
@@ -19,6 +19,7 @@ const BYTES_PER_CHEST: usize = 8 + (CHEST_SLOT_COUNT * BYTES_PER_SLOT);
 const BYTES_PER_FURNACE: usize = 8 + (3 * BYTES_PER_SLOT) + 2;
 const BYTES_PER_INSERTER_V5: usize = 8 + (INSERTER_SLOT_COUNT * BYTES_PER_SLOT);
 const BYTES_PER_INSERTER: usize = 8 + 1 + (INSERTER_SLOT_COUNT * BYTES_PER_SLOT);
+const BYTES_PER_DRILL: usize = 8 + (2 * BYTES_PER_SLOT) + 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkCodecV1 {
@@ -61,7 +62,7 @@ impl ChunkCodec for ChunkCodecV1 {
         }
 
         // NOTE: checksum is computed by the storage layer, not the codec.
-        let payload = encode_payload_v6(chunk)?;
+        let payload = encode_payload_v7(chunk)?;
         let payload_len = u32::try_from(payload.len())
             .map_err(|_| StorageError::Other("payload length exceeds u32::MAX".to_string()))?;
 
@@ -97,6 +98,7 @@ impl ChunkCodec for ChunkCodecV1 {
             && format_version != 3
             && format_version != 4
             && format_version != 5
+            && format_version != 6
         {
             return Err(StorageError::DecodeFailed(format!(
                 "unsupported chunk format version {format_version}"
@@ -131,7 +133,7 @@ impl ChunkCodec for ChunkCodecV1 {
         }
 
         let payload_bytes = reader.take(payload_len)?;
-        let (tiles, entities, resources, placed, chests, furnaces, inserters) =
+        let (tiles, entities, resources, placed, chests, furnaces, inserters, drills) =
             if format_version == 1 {
                 let (tiles, entities) = decode_payload_v1(payload_bytes)?;
                 let resources = vec![
@@ -156,6 +158,7 @@ impl ChunkCodec for ChunkCodecV1 {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 )
             } else if format_version == 2 {
                 let (tiles, entities, resources) = decode_payload_v2(payload_bytes)?;
@@ -174,6 +177,7 @@ impl ChunkCodec for ChunkCodecV1 {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 )
             } else if format_version == 3 {
                 let (tiles, entities, resources, placed) = decode_payload_v3(payload_bytes)?;
@@ -182,6 +186,7 @@ impl ChunkCodec for ChunkCodecV1 {
                     entities,
                     resources,
                     placed,
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -197,11 +202,14 @@ impl ChunkCodec for ChunkCodecV1 {
                     chests,
                     furnaces,
                     Vec::new(),
+                    Vec::new(),
                 )
             } else if format_version == 5 {
-                decode_payload_v5_or_v6(payload_bytes, false)?
+                decode_payload_v5_to_v7(payload_bytes, false, false)?
+            } else if format_version == 6 {
+                decode_payload_v5_to_v7(payload_bytes, true, false)?
             } else {
-                decode_payload_v5_or_v6(payload_bytes, true)?
+                decode_payload_v5_to_v7(payload_bytes, true, true)?
             };
 
         Ok(SimChunkData {
@@ -213,6 +221,7 @@ impl ChunkCodec for ChunkCodecV1 {
             chests,
             furnaces,
             inserters,
+            drills,
             entities,
             saved_tick,
         })
@@ -294,6 +303,21 @@ fn encode_payload_v6(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
         buffer.extend_from_slice(&inserter.object_id.to_le_bytes());
         buffer.push(inserter.direction.to_u8());
         encode_inserter_slots(&mut buffer, &inserter.inv);
+    }
+    Ok(buffer)
+}
+
+fn encode_payload_v7(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
+    let mut buffer = encode_payload_v6(chunk)?;
+    let drill_count = u32::try_from(chunk.drills.len())
+        .map_err(|_| StorageError::Other("drill count exceeds u32::MAX".to_string()))?;
+    buffer.reserve(4 + (chunk.drills.len() * BYTES_PER_DRILL));
+    buffer.extend_from_slice(&drill_count.to_le_bytes());
+    for drill in chunk.drills {
+        buffer.extend_from_slice(&drill.object_id.to_le_bytes());
+        encode_slot(&mut buffer, &drill.state.fuel);
+        encode_slot(&mut buffer, &drill.state.output);
+        buffer.extend_from_slice(&drill.state.progress.to_le_bytes());
     }
     Ok(buffer)
 }
@@ -620,9 +644,10 @@ fn decode_payload_v4(
     Ok((tiles, entities, resources, placed, chests, furnaces))
 }
 
-fn decode_payload_v5_or_v6(
+fn decode_payload_v5_to_v7(
     bytes: &[u8],
     has_inserter_direction: bool,
+    has_drills: bool,
 ) -> Result<(
     Vec<TileId>,
     Vec<Entity>,
@@ -631,6 +656,7 @@ fn decode_payload_v5_or_v6(
     Vec<ChestRecord>,
     Vec<FurnaceRecord>,
     Vec<InserterRecord>,
+    Vec<DrillRecord>,
 )> {
     let mut reader = Reader::new(bytes);
 
@@ -772,6 +798,33 @@ fn decode_payload_v5_or_v6(
         });
     }
 
+    let drills = if has_drills {
+        let drill_count = reader.read_u32()? as usize;
+        if drill_count > 0 && drill_count > reader.remaining() / BYTES_PER_DRILL {
+            return Err(StorageError::DecodeFailed(
+                "drill count exceeds payload size".to_string(),
+            ));
+        }
+        let mut drills = Vec::with_capacity(drill_count);
+        for _ in 0..drill_count {
+            let object_id = reader.read_u64()?;
+            let fuel = decode_slot(&mut reader)?;
+            let output = decode_slot(&mut reader)?;
+            let progress = reader.read_u16()?;
+            drills.push(DrillRecord {
+                object_id,
+                state: DrillState {
+                    fuel,
+                    output,
+                    progress,
+                },
+            });
+        }
+        drills
+    } else {
+        Vec::new()
+    };
+
     if reader.remaining() != 0 {
         return Err(StorageError::DecodeFailed(
             "payload has trailing bytes".to_string(),
@@ -779,7 +832,7 @@ fn decode_payload_v5_or_v6(
     }
 
     Ok((
-        tiles, entities, resources, placed, chests, furnaces, inserters,
+        tiles, entities, resources, placed, chests, furnaces, inserters, drills,
     ))
 }
 

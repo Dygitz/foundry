@@ -116,6 +116,11 @@ pub(crate) fn open_panel_for_tile(
             object_id: cell.object_id,
         });
     }
+    if cell.kind == PLACED_MINING_DRILL && cell.object_id != 0 {
+        return Some(UiMode::MiningDrill {
+            object_id: cell.object_id,
+        });
+    }
     None
 }
 
@@ -153,6 +158,16 @@ pub(crate) fn find_inserter<'a>(
             .iter()
             .find(|i| i.object_id == object_id)
     })
+}
+
+pub(crate) fn find_drill<'a>(
+    runtime: &'a WorldRuntime,
+    object_id: ObjectId,
+) -> Option<&'a DrillRecord> {
+    runtime
+        .loaded
+        .values()
+        .find_map(|loaded| loaded.data.drills.iter().find(|d| d.object_id == object_id))
 }
 
 pub(crate) fn with_chest_mut<R>(
@@ -206,6 +221,26 @@ pub(crate) fn with_inserter_mut<R>(
             .inserters
             .iter()
             .any(|inserter| inserter.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+pub(crate) fn with_drill_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .drills
+            .iter()
+            .any(|drill| drill.object_id == object_id)
         {
             let result = f(&mut loaded.data);
             let snapshot = loaded.data.clone();

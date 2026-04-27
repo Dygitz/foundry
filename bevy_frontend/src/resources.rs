@@ -454,6 +454,7 @@ pub(crate) struct UiIconAssets {
     pub(crate) furnace: Handle<Image>,
     pub(crate) chest: Handle<Image>,
     pub(crate) inserter: Handle<Image>,
+    pub(crate) mining_drill: Handle<Image>,
     pub(crate) crafting: Handle<Image>,
 }
 
@@ -469,6 +470,7 @@ impl UiIconAssets {
             ITEM_FURNACE => self.furnace.clone(),
             ITEM_CHEST => self.chest.clone(),
             ITEM_INSERTER => self.inserter.clone(),
+            ITEM_MINING_DRILL => self.mining_drill.clone(),
             _ => self.empty.clone(),
         }
     }
@@ -487,6 +489,7 @@ pub(crate) enum UiMode {
     Chest { object_id: ObjectId },
     Furnace { object_id: ObjectId },
     Inserter { object_id: ObjectId },
+    MiningDrill { object_id: ObjectId },
 }
 
 impl Default for UiMode {
