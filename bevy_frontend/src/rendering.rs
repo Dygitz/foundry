@@ -436,8 +436,7 @@ pub(crate) fn chunk_pixels(
                     }
                     let placed = placed_at(data, tx as i32, ty as i32);
                     if placed.kind != PLACED_NONE {
-                        let overlay = placed_color(placed.kind);
-                        color = blend_color(color, overlay, 0.88);
+                        color = apply_placed_sprite(color, placed.kind, sub_x, sub_y);
                     }
                     if config.show_chunk_borders
                         && interior_x >= 0
@@ -821,6 +820,100 @@ pub(crate) fn resource_color(kind: ResourceId) -> [u8; 4] {
         RES_COPPER => [190, 120, 60, 255],
         RES_COAL => [30, 30, 30, 255],
         RES_STONE => [120, 120, 120, 255],
+        _ => [0, 0, 0, 0],
+    }
+}
+
+const FURNACE_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "..kkkk..", ".kllllk.", "kmmmdmmk", "kmdrrdmk", "kmdyydmk", "kmmmmmmk", ".kddddk.", "..ssss..",
+];
+
+const CHEST_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "..kkkk..", ".kllllk.", "kbbbbbbk", "kddmdddk", "kbbbbbbk", "kbdlldbk", ".kddddk.", "..ssss..",
+];
+
+const INSERTER_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "....kk..", "...klyk.", "..klyyk.", ".klydkk.", "..kddk..", "..kyyk..", "..kkkk..", "...ss...",
+];
+
+const MINING_DRILL_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "..kkkk..", ".kllmmk.", "kmmddmmk", "kmdccdmk", "kmmddmmk", ".kdkkdk.", ".kddddk.", "..ssss..",
+];
+
+pub(crate) fn apply_placed_sprite(
+    base: [u8; 4],
+    kind: PlacedId,
+    sub_x: usize,
+    sub_y: usize,
+) -> [u8; 4] {
+    let Some(rows) = placed_sprite_rows(kind) else {
+        return blend_color(base, placed_color(kind), 0.88);
+    };
+    let Some(row) = rows.get(sub_y) else {
+        return base;
+    };
+    let Some(key) = row.as_bytes().get(sub_x).copied() else {
+        return base;
+    };
+    let overlay = placed_sprite_palette(kind, key);
+    if overlay[3] == 0 {
+        return base;
+    }
+    blend_color(
+        base,
+        [overlay[0], overlay[1], overlay[2], 255],
+        overlay[3] as f32 / 255.0,
+    )
+}
+
+fn placed_sprite_rows(kind: PlacedId) -> Option<&'static [&'static str; TERRAIN_TILE_PIXELS]> {
+    match kind {
+        PLACED_FURNACE => Some(&FURNACE_WORLD_SPRITE),
+        PLACED_CHEST => Some(&CHEST_WORLD_SPRITE),
+        PLACED_INSERTER => Some(&INSERTER_WORLD_SPRITE),
+        PLACED_MINING_DRILL => Some(&MINING_DRILL_WORLD_SPRITE),
+        _ => None,
+    }
+}
+
+fn placed_sprite_palette(kind: PlacedId, key: u8) -> [u8; 4] {
+    match kind {
+        PLACED_FURNACE => match key {
+            b'k' => [36, 33, 31, 255],
+            b'd' => [78, 72, 67, 255],
+            b'm' => [126, 119, 108, 255],
+            b'l' => [176, 170, 156, 255],
+            b'r' => [219, 77, 38, 255],
+            b'y' => [255, 183, 52, 255],
+            b's' => [22, 17, 13, 96],
+            _ => [0, 0, 0, 0],
+        },
+        PLACED_CHEST => match key {
+            b'k' => [49, 30, 17, 255],
+            b'd' => [91, 54, 28, 255],
+            b'b' => [139, 82, 39, 255],
+            b'l' => [190, 119, 54, 255],
+            b'm' => [218, 178, 83, 255],
+            b's' => [22, 17, 13, 92],
+            _ => [0, 0, 0, 0],
+        },
+        PLACED_INSERTER => match key {
+            b'k' => [49, 45, 35, 255],
+            b'd' => [121, 84, 29, 255],
+            b'y' => [210, 149, 38, 255],
+            b'l' => [246, 208, 88, 255],
+            b's' => [22, 17, 13, 84],
+            _ => [0, 0, 0, 0],
+        },
+        PLACED_MINING_DRILL => match key {
+            b'k' => [35, 38, 39, 255],
+            b'd' => [79, 84, 83, 255],
+            b'm' => [116, 124, 124, 255],
+            b'l' => [185, 193, 188, 255],
+            b'c' => [224, 154, 54, 255],
+            b's' => [22, 17, 13, 96],
+            _ => [0, 0, 0, 0],
+        },
         _ => [0, 0, 0, 0],
     }
 }
