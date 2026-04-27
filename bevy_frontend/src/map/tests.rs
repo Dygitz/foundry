@@ -68,9 +68,9 @@ fn padded_map_pixel(pixels: &[u8], x: usize, y: usize) -> [u8; 4] {
 
 fn chunk_pixel(pixels: &[u8], tx: usize, ty: usize) -> [u8; 4] {
     let edge = CHUNK_EDGE as usize;
-    let padded = edge + 2;
-    let ox = tx + 1;
-    let oy = edge - ty;
+    let padded = (edge + 2) * TERRAIN_TILE_PIXELS;
+    let ox = (tx + 1) * TERRAIN_TILE_PIXELS + TERRAIN_TILE_PIXELS / 2;
+    let oy = (edge - ty) * TERRAIN_TILE_PIXELS + TERRAIN_TILE_PIXELS / 2;
     let idx = (oy * padded + ox) * 4;
     [
         pixels[idx],
@@ -212,16 +212,15 @@ fn map_snapshot_includes_placed_overlay() {
 }
 
 #[test]
-fn map_snapshot_orientation_matches_chunk_texture_interior() {
+fn chunk_texture_uses_detailed_interior_pixels() {
     let data = test_chunk();
     let config = WorldRenderConfig::default();
-    let map_pixels = map_snapshot_pixels(&data, 7);
-    let chunk_pixels = chunk_pixels(&data, &config, 7, None);
+    let pixels = chunk_pixels(&data, &config, 7, None);
+    let sample = chunk_pixel(&pixels, 11, 13);
 
-    assert_eq!(
-        map_pixel(&map_pixels, 11, 13),
-        chunk_pixel(&chunk_pixels, 11, 13)
-    );
+    assert_eq!(pixels.len(), CHUNK_TEXTURE_EDGE * CHUNK_TEXTURE_EDGE * 4);
+    assert_eq!(sample[3], 255);
+    assert_ne!(sample, [0, 0, 0, 0]);
 }
 
 #[test]

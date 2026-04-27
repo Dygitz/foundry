@@ -2,7 +2,7 @@
 use crate::imports::*;
 use crate::{
     app::*, camera::*, components::*, gameplay::*, map::*, player::*, resources::*, storage::*,
-    ui::*, world::*,
+    terrain_assets::*, ui::*, world::*,
 };
 
 #[allow(dead_code)]
@@ -336,6 +336,9 @@ pub(crate) fn build_player_image() -> Image {
     image
 }
 
+pub(crate) const TERRAIN_TILE_PIXELS: usize = 8;
+pub(crate) const CHUNK_TEXTURE_EDGE: usize = (CHUNK_EDGE as usize + 2) * TERRAIN_TILE_PIXELS;
+
 pub(crate) fn build_chunk_image(
     data: &SimChunkData,
     config: &WorldRenderConfig,
@@ -343,11 +346,10 @@ pub(crate) fn build_chunk_image(
     highlight: Option<(i32, i32)>,
 ) -> Image {
     let pixels = chunk_pixels(data, config, world_seed, highlight);
-    let padded_edge = CHUNK_EDGE as u32 + 2;
     let mut image = Image::new_fill(
         Extent3d {
-            width: padded_edge,
-            height: padded_edge,
+            width: CHUNK_TEXTURE_EDGE as u32,
+            height: CHUNK_TEXTURE_EDGE as u32,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -360,8 +362,9 @@ pub(crate) fn build_chunk_image(
 }
 
 pub(crate) fn chunk_sprite_rect() -> Rect {
-    let edge = CHUNK_EDGE as f32;
-    Rect::from_corners(Vec2::new(1.0, 1.0), Vec2::new(edge + 1.0, edge + 1.0))
+    let pad = TERRAIN_TILE_PIXELS as f32;
+    let edge = CHUNK_EDGE as f32 * TERRAIN_TILE_PIXELS as f32;
+    Rect::from_corners(Vec2::new(pad, pad), Vec2::new(pad + edge, pad + edge))
 }
 
 pub(crate) fn refresh_chunk_texture(
@@ -384,73 +387,415 @@ pub(crate) fn chunk_pixels(
     highlight: Option<(i32, i32)>,
 ) -> Vec<u8> {
     let edge = CHUNK_EDGE as usize;
-    let padded_edge = edge + 2;
-    let mut pixels = Vec::with_capacity(padded_edge * padded_edge * 4);
+    let padded_tiles = edge + 2;
+    let mut pixels = Vec::with_capacity(CHUNK_TEXTURE_EDGE * CHUNK_TEXTURE_EDGE * 4);
 
-    for oy in 0..padded_edge {
-        let base_ty = if oy == 0 {
+    for tile_oy in 0..padded_tiles {
+        let base_ty = if tile_oy == 0 {
             0
-        } else if oy > edge {
+        } else if tile_oy > edge {
             edge - 1
         } else {
-            oy - 1
+            tile_oy - 1
         };
         let ty = edge - 1 - base_ty;
-        let interior_y = oy as i32 - 1;
-        for ox in 0..padded_edge {
-            let tx = if ox == 0 {
-                0
-            } else if ox > edge {
-                edge - 1
-            } else {
-                ox - 1
-            };
-            let interior_x = ox as i32 - 1;
-            let tile = tile_at(data, tx as i32, ty as i32, world_seed);
-            let mut color = if tile == WATER_TILE {
-                let neighbor_is_land =
-                    !is_water(tile_at(data, tx as i32 - 1, ty as i32, world_seed))
-                        || !is_water(tile_at(data, tx as i32 + 1, ty as i32, world_seed))
-                        || !is_water(tile_at(data, tx as i32, ty as i32 - 1, world_seed))
-                        || !is_water(tile_at(data, tx as i32, ty as i32 + 1, world_seed));
-                if neighbor_is_land {
-                    shallow_water_color()
+        let interior_y = tile_oy as i32 - 1;
+        for sub_y in 0..TERRAIN_TILE_PIXELS {
+            for tile_ox in 0..padded_tiles {
+                let tx = if tile_ox == 0 {
+                    0
+                } else if tile_ox > edge {
+                    edge - 1
                 } else {
-                    tile_color(tile)
+                    tile_ox - 1
+                };
+                let interior_x = tile_ox as i32 - 1;
+                let tile = tile_at(data, tx as i32, ty as i32, world_seed);
+                let gx = data.coord.cx * CHUNK_EDGE as i32 + tx as i32;
+                let gy = data.coord.cy * CHUNK_EDGE as i32 + ty as i32;
+
+                for sub_x in 0..TERRAIN_TILE_PIXELS {
+                    let mut color = detailed_terrain_color(
+                        data, tile, tx as i32, ty as i32, gx, gy, sub_x, sub_y, world_seed,
+                    );
+
+                    let resource = resource_at(data, tx as i32, ty as i32);
+                    if resource.kind != RES_NONE && resource.amount > 0 {
+                        color = apply_resource_overlay(
+                            data,
+                            color,
+                            resource.kind,
+                            tx as i32,
+                            ty as i32,
+                            gx,
+                            gy,
+                            sub_x,
+                            sub_y,
+                            world_seed,
+                        );
+                    }
+                    let placed = placed_at(data, tx as i32, ty as i32);
+                    if placed.kind != PLACED_NONE {
+                        let overlay = placed_color(placed.kind);
+                        color = blend_color(color, overlay, 0.88);
+                    }
+                    if config.show_chunk_borders
+                        && interior_x >= 0
+                        && interior_y >= 0
+                        && (interior_x == 0 || interior_y == 0)
+                    {
+                        color = darken_color(color);
+                    }
+                    if let Some((hx, hy)) = highlight {
+                        if gx == hx && gy == hy {
+                            color = blend_color(color, [220, 40, 40, 255], 0.8);
+                        }
+                    }
+                    pixels.extend_from_slice(&color);
                 }
-            } else {
-                tile_color(tile)
-            };
-            let gx = data.coord.cx * CHUNK_EDGE as i32 + tx as i32;
-            let gy = data.coord.cy * CHUNK_EDGE as i32 + ty as i32;
-            let jitter = tile_jitter(gx, gy, world_seed, tile);
-            color = apply_jitter(color, jitter);
-            let resource = resource_at(data, tx as i32, ty as i32);
-            if resource.kind != RES_NONE && resource.amount > 0 {
-                let overlay = resource_color(resource.kind);
-                color = blend_color(color, overlay, 0.85);
             }
-            let placed = placed_at(data, tx as i32, ty as i32);
-            if placed.kind != PLACED_NONE {
-                let overlay = placed_color(placed.kind);
-                color = blend_color(color, overlay, 0.9);
-            }
-            if config.show_chunk_borders
-                && interior_x >= 0
-                && interior_y >= 0
-                && (interior_x == 0 || interior_y == 0)
-            {
-                color = darken_color(color);
-            }
-            if let Some((hx, hy)) = highlight {
-                if gx == hx && gy == hy {
-                    color = [220, 40, 40, 255];
-                }
-            }
-            pixels.extend_from_slice(&color);
         }
     }
     pixels
+}
+
+fn detailed_terrain_color(
+    data: &SimChunkData,
+    tile: TileId,
+    tx: i32,
+    ty: i32,
+    gx: i32,
+    gy: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let mut color = sample_terrain_texture(tile, gx, gy, sub_x, sub_y, world_seed);
+    let jitter = detail_jitter(gx, gy, sub_x, sub_y, world_seed);
+    color = adjust_color(color, jitter);
+    color = apply_tile_variant_tint(color, tile);
+
+    if is_water(tile) {
+        color = apply_water_edges(data, color, tx, ty, sub_x, sub_y, world_seed);
+    } else {
+        color = apply_land_edges(data, color, tile, tx, ty, sub_x, sub_y, world_seed);
+    }
+
+    color
+}
+
+fn sample_terrain_texture(
+    tile: TileId,
+    gx: i32,
+    gy: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let texture = if is_water(tile) {
+        &WATER_TEXTURE
+    } else if is_dirt_tile(tile) {
+        &DIRT_TEXTURE
+    } else {
+        &GRASS_TEXTURE
+    };
+    let world_px = gx
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add(sub_x as i32);
+    let world_py = gy
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add((TERRAIN_TILE_PIXELS - 1 - sub_y) as i32);
+    let seed_shift_x = ((world_seed >> 7) & 31) as i32;
+    let seed_shift_y = ((world_seed >> 17) & 31) as i32;
+    let x = (world_px + seed_shift_x).rem_euclid(TERRAIN_TEXTURE_EDGE as i32) as usize;
+    let y = (world_py + seed_shift_y).rem_euclid(TERRAIN_TEXTURE_EDGE as i32) as usize;
+    texture[y * TERRAIN_TEXTURE_EDGE + x]
+}
+
+fn apply_water_edges(
+    data: &SimChunkData,
+    mut color: [u8; 4],
+    tx: i32,
+    ty: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let land = |dx: i32, dy: i32| !is_water(tile_at(data, tx + dx, ty + dy, world_seed));
+    let shallow = shallow_water_color();
+    let bank = [91, 73, 45, 255];
+    let edge = strongest_edge_weight(land, sub_x, sub_y, 4);
+    if edge > 0.0 {
+        color = blend_color(color, shallow, 0.38 * edge);
+    }
+    let bank_edge = strongest_edge_weight(land, sub_x, sub_y, 2);
+    if bank_edge > 0.0 {
+        color = blend_color(color, bank, 0.46 * bank_edge);
+    }
+    color
+}
+
+fn apply_land_edges(
+    data: &SimChunkData,
+    mut color: [u8; 4],
+    tile: TileId,
+    tx: i32,
+    ty: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let water = |dx: i32, dy: i32| is_water(tile_at(data, tx + dx, ty + dy, world_seed));
+    let water_edge = strongest_edge_weight(water, sub_x, sub_y, 3);
+    if water_edge > 0.0 {
+        color = blend_color(color, [83, 70, 44, 255], 0.55 * water_edge);
+    }
+
+    let neighbor_is_dirt =
+        |dx: i32, dy: i32| is_dirt_tile(tile_at(data, tx + dx, ty + dy, world_seed));
+    let neighbor_is_grass = |dx: i32, dy: i32| {
+        let other = tile_at(data, tx + dx, ty + dy, world_seed);
+        !is_water(other) && !is_dirt_tile(other)
+    };
+
+    if !is_dirt_tile(tile) {
+        let dirt_edge = strongest_edge_weight(neighbor_is_dirt, sub_x, sub_y, 3);
+        if dirt_edge > 0.0 {
+            let dirt = sample_texture_at(&DIRT_TEXTURE, tx, ty, sub_x, sub_y, world_seed);
+            color = blend_color(color, dirt, 0.36 * dirt_edge);
+        }
+    } else {
+        let grass_edge = strongest_edge_weight(neighbor_is_grass, sub_x, sub_y, 2);
+        if grass_edge > 0.0 {
+            let grass = sample_texture_at(&GRASS_TEXTURE, tx, ty, sub_x, sub_y, world_seed);
+            color = blend_color(color, grass, 0.22 * grass_edge);
+        }
+    }
+
+    color
+}
+
+fn sample_texture_at(
+    texture: &[[u8; 4]; TERRAIN_TEXTURE_LEN],
+    tx: i32,
+    ty: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let world_px = tx
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add(sub_x as i32);
+    let world_py = ty
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add((TERRAIN_TILE_PIXELS - 1 - sub_y) as i32);
+    let seed_shift_x = ((world_seed >> 7) & 31) as i32;
+    let seed_shift_y = ((world_seed >> 17) & 31) as i32;
+    let x = (world_px + seed_shift_x).rem_euclid(TERRAIN_TEXTURE_EDGE as i32) as usize;
+    let y = (world_py + seed_shift_y).rem_euclid(TERRAIN_TEXTURE_EDGE as i32) as usize;
+    texture[y * TERRAIN_TEXTURE_EDGE + x]
+}
+
+fn apply_resource_overlay(
+    data: &SimChunkData,
+    base: [u8; 4],
+    kind: ResourceId,
+    tx: i32,
+    ty: i32,
+    gx: i32,
+    gy: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let noise = resource_noise(gx, gy, sub_x, sub_y, world_seed, kind as u64);
+    let edge = strongest_edge_weight(
+        |dx, dy| !resource_matches(data, kind, tx + dx, ty + dy, world_seed),
+        sub_x,
+        sub_y,
+        3,
+    );
+    let edge_fade = 1.0 - edge * 0.68;
+
+    let dx = sub_x as f32 - (TERRAIN_TILE_PIXELS as f32 - 1.0) * 0.5;
+    let dy = sub_y as f32 - (TERRAIN_TILE_PIXELS as f32 - 1.0) * 0.5;
+    let radial = 1.0 - ((dx * dx + dy * dy).sqrt() / 5.2).clamp(0.0, 1.0);
+
+    if noise < resource_hole_threshold(kind) && radial < 0.82 {
+        return base;
+    }
+
+    let mut overlay = if let Some(texture) = resource_texture(kind) {
+        sample_resource_texture(texture, gx, gy, sub_x, sub_y, world_seed)
+    } else {
+        adjust_color(resource_color(kind), ((noise * 30.0).round() as i16) - 15)
+    };
+
+    let vein = resource_noise(
+        gx,
+        gy,
+        sub_x,
+        sub_y,
+        world_seed.rotate_left(17),
+        0x4f1b_bcdc_9d5a_4337 ^ kind as u64,
+    );
+    if vein > 0.88 {
+        overlay = blend_color(overlay, resource_highlight(kind), 0.34);
+    }
+
+    let clump = 0.48 + noise * 0.52;
+    let shape = 0.72 + radial * 0.24;
+    let weight = (resource_overlay_weight(kind) * clump * shape * edge_fade).clamp(0.0, 0.86);
+    blend_color(base, overlay, weight)
+}
+
+fn resource_texture(kind: ResourceId) -> Option<&'static [[u8; 4]; RESOURCE_TEXTURE_LEN]> {
+    match kind {
+        RES_COAL => Some(&COAL_RESOURCE_TEXTURE),
+        RES_IRON => Some(&IRON_RESOURCE_TEXTURE),
+        RES_COPPER => Some(&COPPER_RESOURCE_TEXTURE),
+        _ => None,
+    }
+}
+
+fn sample_resource_texture(
+    texture: &[[u8; 4]; RESOURCE_TEXTURE_LEN],
+    gx: i32,
+    gy: i32,
+    sub_x: usize,
+    sub_y: usize,
+    world_seed: u64,
+) -> [u8; 4] {
+    let world_px = gx
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add(sub_x as i32);
+    let world_py = gy
+        .saturating_mul(TERRAIN_TILE_PIXELS as i32)
+        .saturating_add((TERRAIN_TILE_PIXELS - 1 - sub_y) as i32);
+    let seed_shift_x = ((world_seed >> 23) & 31) as i32;
+    let seed_shift_y = ((world_seed >> 37) & 31) as i32;
+    let x = (world_px + seed_shift_x).rem_euclid(RESOURCE_TEXTURE_EDGE as i32) as usize;
+    let y = (world_py + seed_shift_y).rem_euclid(RESOURCE_TEXTURE_EDGE as i32) as usize;
+    texture[y * RESOURCE_TEXTURE_EDGE + x]
+}
+
+fn resource_matches(
+    data: &SimChunkData,
+    kind: ResourceId,
+    tx: i32,
+    ty: i32,
+    world_seed: u64,
+) -> bool {
+    let edge = CHUNK_EDGE as i32;
+    let cell = if tx >= 0 && tx < edge && ty >= 0 && ty < edge {
+        resource_at(data, tx, ty)
+    } else {
+        let gx = data.coord.cx * CHUNK_EDGE as i32 + tx;
+        let gy = data.coord.cy * CHUNK_EDGE as i32 + ty;
+        resource_at_global(gx, gy, data.layer, world_seed)
+    };
+    cell.kind == kind && cell.amount > 0
+}
+
+fn resource_hole_threshold(kind: ResourceId) -> f32 {
+    match kind {
+        RES_COAL => 0.18,
+        RES_IRON => 0.15,
+        RES_COPPER => 0.14,
+        RES_STONE => 0.2,
+        _ => 1.0,
+    }
+}
+
+fn resource_overlay_weight(kind: ResourceId) -> f32 {
+    match kind {
+        RES_COAL => 0.68,
+        RES_IRON => 0.64,
+        RES_COPPER => 0.66,
+        RES_STONE => 0.58,
+        _ => 0.0,
+    }
+}
+
+fn resource_highlight(kind: ResourceId) -> [u8; 4] {
+    match kind {
+        RES_COAL => [100, 106, 118, 255],
+        RES_IRON => [221, 228, 232, 255],
+        RES_COPPER => [238, 157, 86, 255],
+        RES_STONE => [165, 165, 165, 255],
+        _ => [0, 0, 0, 0],
+    }
+}
+
+fn resource_noise(gx: i32, gy: i32, sub_x: usize, sub_y: usize, world_seed: u64, salt: u64) -> f32 {
+    let mut z = world_seed ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    z ^= (gx as i64 as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z ^= (gy as i64 as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= (sub_x as u64).wrapping_mul(0x632b_e59b_d9b4_e019);
+    z ^= (sub_y as u64).wrapping_mul(0x8cb9_2baa_72f3_d8dd);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    ((z >> 40) as u32 & 0xffff) as f32 / 65_535.0
+}
+
+fn strongest_edge_weight(
+    predicate: impl Fn(i32, i32) -> bool,
+    sub_x: usize,
+    sub_y: usize,
+    width: usize,
+) -> f32 {
+    let mut weight: f32 = 0.0;
+    if predicate(-1, 0) && sub_x < width {
+        weight = weight.max((width - sub_x) as f32 / width as f32);
+    }
+    if predicate(1, 0) && sub_x >= TERRAIN_TILE_PIXELS - width {
+        weight = weight.max((sub_x + 1 - (TERRAIN_TILE_PIXELS - width)) as f32 / width as f32);
+    }
+    if predicate(0, 1) && sub_y < width {
+        weight = weight.max((width - sub_y) as f32 / width as f32);
+    }
+    if predicate(0, -1) && sub_y >= TERRAIN_TILE_PIXELS - width {
+        weight = weight.max((sub_y + 1 - (TERRAIN_TILE_PIXELS - width)) as f32 / width as f32);
+    }
+    weight.clamp(0.0, 1.0)
+}
+
+fn is_dirt_tile(tile: TileId) -> bool {
+    matches!(tile, 4 | 5)
+}
+
+fn apply_tile_variant_tint(color: [u8; 4], tile: TileId) -> [u8; 4] {
+    let amount = match tile {
+        0 => -4,
+        1 => 1,
+        2 => 5,
+        3 => 8,
+        4 => -5,
+        5 => 4,
+        _ => 0,
+    };
+    adjust_color(color, amount)
+}
+
+fn detail_jitter(gx: i32, gy: i32, sub_x: usize, sub_y: usize, world_seed: u64) -> i16 {
+    let mut z = world_seed;
+    z ^= (gx as i64 as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    z ^= (gy as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f);
+    z ^= (sub_x as u64).wrapping_mul(0x165667b19e3779f9);
+    z ^= (sub_y as u64).wrapping_mul(0xd6e8feb86659fd93);
+    let mixed = z ^ (z >> 30).wrapping_mul(0xbf58476d1ce4e5b9);
+    ((mixed & 7) as i16) - 3
+}
+
+fn adjust_color(color: [u8; 4], amount: i16) -> [u8; 4] {
+    let adjust = |value: u8| -> u8 { (value as i16 + amount).clamp(0, 255) as u8 };
+    [
+        adjust(color[0]),
+        adjust(color[1]),
+        adjust(color[2]),
+        color[3],
+    ]
 }
 
 pub(crate) fn tile_color(tile: TileId) -> [u8; 4] {

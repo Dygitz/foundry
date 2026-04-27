@@ -8,6 +8,7 @@ mod player;
 mod rendering;
 mod resources;
 mod storage;
+mod terrain_assets;
 mod ui;
 mod world;
 

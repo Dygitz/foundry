@@ -35,8 +35,8 @@ pub(crate) use simulation_core::{
     SimChunkView, Slot, TileId, WATER_TILE, can_craft, deposit_to_chest, deposit_to_drill_fuel,
     deposit_to_furnace_fuel, deposit_to_furnace_input, deposit_to_inserter, generate_chunk_data,
     is_placeable_item, is_water, item_name, item_to_placed_kind, object_id_for_tile, placed_at,
-    placed_kind_to_item, recipe_for_index, resource_at, resource_to_item, smelt_output_for_input,
-    take_from_chest, take_from_drill, take_from_furnace, take_from_inserter, terrain_tile_id,
-    tile_at, tile_jitter, tile_to_chunk_local, try_craft,
+    placed_kind_to_item, recipe_for_index, resource_at, resource_at_global, resource_to_item,
+    smelt_output_for_input, take_from_chest, take_from_drill, take_from_furnace,
+    take_from_inserter, terrain_tile_id, tile_at, tile_jitter, tile_to_chunk_local, try_craft,
 };
 pub(crate) use web_storage_indexeddb::IndexedDbStorage;
