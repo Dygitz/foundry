@@ -45,6 +45,7 @@ impl Plugin for FoundryUiPlugin {
 pub(crate) fn setup(
     mut commands: Commands,
     config: Res<WorldRenderConfig>,
+    asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let mut camera = commands.spawn(Camera2d);
@@ -64,7 +65,7 @@ pub(crate) fn setup(
         Facing::Down,
         Player,
     ));
-    let icons = build_ui_icon_assets(&mut images);
+    let icons = build_ui_icon_assets(&asset_server, &mut images);
     commands.insert_resource(icons.clone());
     spawn_game_hud(&mut commands, &icons);
     spawn_pickup_feed(&mut commands);
@@ -146,20 +147,23 @@ pub(crate) fn spawn_pickup_feed(commands: &mut Commands) {
     ));
 }
 
-pub(crate) fn build_ui_icon_assets(images: &mut Assets<Image>) -> UiIconAssets {
+pub(crate) fn build_ui_icon_assets(
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+) -> UiIconAssets {
     UiIconAssets {
         empty: images.add(build_hud_icon_image(HudIconKind::Empty)),
-        heart: images.add(build_hud_icon_image(HudIconKind::Heart)),
-        stone: images.add(build_hud_icon_image(HudIconKind::Stone)),
-        copper_ore: images.add(build_hud_icon_image(HudIconKind::CopperOre)),
-        coal: images.add(build_hud_icon_image(HudIconKind::Coal)),
-        iron_ore: images.add(build_hud_icon_image(HudIconKind::IronOre)),
-        iron_plate: images.add(build_hud_icon_image(HudIconKind::IronPlate)),
-        copper_plate: images.add(build_hud_icon_image(HudIconKind::CopperPlate)),
-        furnace: images.add(build_hud_icon_image(HudIconKind::Furnace)),
-        chest: images.add(build_hud_icon_image(HudIconKind::Chest)),
-        inserter: images.add(build_hud_icon_image(HudIconKind::Inserter)),
-        crafting: images.add(build_hud_icon_image(HudIconKind::Anvil)),
+        heart: asset_server.load("sprites/ui/heart.png"),
+        stone: asset_server.load("sprites/items/stone.png"),
+        copper_ore: asset_server.load("sprites/items/copper_ore.png"),
+        coal: asset_server.load("sprites/items/coal.png"),
+        iron_ore: asset_server.load("sprites/items/iron_ore.png"),
+        iron_plate: asset_server.load("sprites/items/iron_plate.png"),
+        copper_plate: asset_server.load("sprites/items/copper_plate.png"),
+        furnace: asset_server.load("sprites/items/furnace.png"),
+        chest: asset_server.load("sprites/items/chest.png"),
+        inserter: asset_server.load("sprites/items/inserter.png"),
+        crafting: asset_server.load("sprites/ui/crafting.png"),
     }
 }
 

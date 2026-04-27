@@ -5,6 +5,7 @@ use crate::{
     ui::*, world::*,
 };
 
+#[allow(dead_code)]
 pub(crate) enum HudIconKind {
     Empty,
     Heart,

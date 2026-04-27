@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 pub(crate) use std::collections::{HashMap, HashSet, VecDeque};
 
+pub(crate) use bevy::asset::AssetMetaCheck;
 pub(crate) use bevy::ecs::prelude::ChildSpawnerCommands;
 pub(crate) use bevy::ecs::schedule::IntoScheduleConfigs;
 pub(crate) use bevy::ecs::system::SystemParam;
