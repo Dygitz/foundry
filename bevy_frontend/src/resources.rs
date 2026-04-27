@@ -345,6 +345,13 @@ pub(crate) struct PlayerState {
     pub(crate) inventory: Inventory,
 }
 
+#[derive(Resource, Clone)]
+pub(crate) struct PlayerSpriteAssets {
+    pub(crate) down: Handle<Image>,
+    pub(crate) up: Handle<Image>,
+    pub(crate) side: Handle<Image>,
+}
+
 #[derive(Resource)]
 pub(crate) struct PlacementState {
     pub(crate) selected: Option<ItemId>,

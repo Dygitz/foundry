@@ -54,7 +54,13 @@ pub(crate) fn setup(
         scale: 0.35,
         ..OrthographicProjection::default_2d()
     }));
-    let player_texture = images.add(build_player_image());
+    let player_sprites = PlayerSpriteAssets {
+        down: asset_server.load("sprites/player/player_down.png"),
+        up: asset_server.load("sprites/player/player_up.png"),
+        side: asset_server.load("sprites/player/player_side.png"),
+    };
+    let player_texture = player_sprites.down.clone();
+    commands.insert_resource(player_sprites);
     commands.spawn((
         Sprite {
             image: player_texture,

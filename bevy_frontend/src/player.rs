@@ -94,12 +94,28 @@ pub(crate) fn player_movement_system(
     }
 }
 
-pub(crate) fn player_visual_system(mut player_query: Query<(&Facing, &mut Sprite), With<Player>>) {
+pub(crate) fn player_visual_system(
+    sprites: Res<PlayerSpriteAssets>,
+    mut player_query: Query<(&Facing, &mut Sprite), With<Player>>,
+) {
     for (facing, mut sprite) in &mut player_query {
         match facing {
-            Facing::Left => sprite.flip_x = true,
-            Facing::Right => sprite.flip_x = false,
-            Facing::Up | Facing::Down => {}
+            Facing::Left => {
+                sprite.image = sprites.side.clone();
+                sprite.flip_x = true;
+            }
+            Facing::Right => {
+                sprite.image = sprites.side.clone();
+                sprite.flip_x = false;
+            }
+            Facing::Up => {
+                sprite.image = sprites.up.clone();
+                sprite.flip_x = false;
+            }
+            Facing::Down => {
+                sprite.image = sprites.down.clone();
+                sprite.flip_x = false;
+            }
         }
     }
 }
