@@ -23,6 +23,8 @@ fn test_chunk() -> SimChunkData {
         furnaces: Vec::new(),
         inserters: Vec::new(),
         drills: Vec::new(),
+        alembics: Vec::new(),
+        crucibles: Vec::new(),
         entities: Vec::new(),
         saved_tick: 0,
     }

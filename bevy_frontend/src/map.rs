@@ -696,10 +696,10 @@ pub(crate) fn normalize_map_resource_metadata(
 
 pub(crate) fn resource_display_name(kind: ResourceId) -> &'static str {
     match kind {
-        RES_IRON => "Iron Ore",
-        RES_COPPER => "Copper Ore",
-        RES_COAL => "Coal",
-        RES_STONE => "Stone",
+        RES_IRON => "Ferric Ore",
+        RES_COPPER => "Cupric Ore",
+        RES_COAL => "Black Salt",
+        RES_STONE => "Saltstone",
         _ => "Resource",
     }
 }

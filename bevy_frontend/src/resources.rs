@@ -479,6 +479,16 @@ pub(crate) struct UiIconAssets {
     pub(crate) chest: Handle<Image>,
     pub(crate) inserter: Handle<Image>,
     pub(crate) mining_drill: Handle<Image>,
+    pub(crate) alembic: Handle<Image>,
+    pub(crate) crucible: Handle<Image>,
+    pub(crate) ferric_essence: Handle<Image>,
+    pub(crate) cupric_essence: Handle<Image>,
+    pub(crate) umbral_essence: Handle<Image>,
+    pub(crate) mineral_essence: Handle<Image>,
+    pub(crate) lodestone: Handle<Image>,
+    pub(crate) brass_core: Handle<Image>,
+    pub(crate) cinder_glass: Handle<Image>,
+    pub(crate) quintessence: Handle<Image>,
     pub(crate) crafting: Handle<Image>,
     pub(crate) tips: Handle<Image>,
 }
@@ -492,10 +502,20 @@ impl UiIconAssets {
             ITEM_IRON_ORE => self.iron_ore.clone(),
             ITEM_IRON_PLATE => self.iron_plate.clone(),
             ITEM_COPPER_PLATE => self.copper_plate.clone(),
+            ITEM_FERRIC_ESSENCE => self.ferric_essence.clone(),
+            ITEM_CUPRIC_ESSENCE => self.cupric_essence.clone(),
+            ITEM_UMBRAL_ESSENCE => self.umbral_essence.clone(),
+            ITEM_MINERAL_ESSENCE => self.mineral_essence.clone(),
+            ITEM_LODESTONE => self.lodestone.clone(),
+            ITEM_BRASS_CORE => self.brass_core.clone(),
+            ITEM_CINDER_GLASS => self.cinder_glass.clone(),
+            ITEM_QUINTESSENCE => self.quintessence.clone(),
             ITEM_FURNACE => self.furnace.clone(),
             ITEM_CHEST => self.chest.clone(),
             ITEM_INSERTER => self.inserter.clone(),
             ITEM_MINING_DRILL => self.mining_drill.clone(),
+            ITEM_ALEMBIC => self.alembic.clone(),
+            ITEM_CRUCIBLE => self.crucible.clone(),
             _ => self.empty.clone(),
         }
     }
@@ -507,6 +527,8 @@ pub(crate) struct PlacementPreviewAssets {
     pub(crate) chest: Handle<Image>,
     pub(crate) inserter: Handle<Image>,
     pub(crate) mining_drill: Handle<Image>,
+    pub(crate) alembic: Handle<Image>,
+    pub(crate) crucible: Handle<Image>,
 }
 
 impl PlacementPreviewAssets {
@@ -516,6 +538,8 @@ impl PlacementPreviewAssets {
             ITEM_CHEST => Some(self.chest.clone()),
             ITEM_INSERTER => Some(self.inserter.clone()),
             ITEM_MINING_DRILL => Some(self.mining_drill.clone()),
+            ITEM_ALEMBIC => Some(self.alembic.clone()),
+            ITEM_CRUCIBLE => Some(self.crucible.clone()),
             _ => None,
         }
     }
@@ -535,6 +559,8 @@ pub(crate) enum UiMode {
     Furnace { object_id: ObjectId },
     Inserter { object_id: ObjectId },
     MiningDrill { object_id: ObjectId },
+    Alembic { object_id: ObjectId },
+    Crucible { object_id: ObjectId },
 }
 
 impl Default for UiMode {

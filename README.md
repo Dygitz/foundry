@@ -1,6 +1,6 @@
 # Foundry
 
-A browser-based factory/survival sandbox built with **Rust + WebAssembly** and **Bevy**.
+A browser-based alchemical factory/survival sandbox built with **Rust + WebAssembly** and **Bevy**.
 
 Play the current build here: **https://dygitz.github.io/foundry/**
 
@@ -18,21 +18,21 @@ This repo is structured to keep simulation/game state independent from rendering
 - Deterministic terrain generation
 - Ores/resources and mining (collected into inventory)
 - Player movement + camera follow + mouse-wheel zoom
-- Crafting menu + placeable structures (furnace, chest, inserter, mining drill)
-- Furnace smelting (ore -> plates) + chest storage UI
-- Directional inserters with inspectable internal buffers that move items between chests, furnaces, and mining drills
+- Crafting menu + placeable structures (Athanor, Reliquary, Brass Arm, Extractor, Alembic, Crucible)
+- Athanor smelting (ore -> calx), Alembic distillation (reagents -> essences), Crucible transmutation (essences -> components), and Reliquary storage UI
+- Directional Brass Arms with inspectable internal buffers that move items between Reliquaries, Athanors, Extractors, Alembics, and Crucibles
 - Persistent world data + inventory (IndexedDB, autosave + recovery)
 
 ## Controls
 
 - Move: WASD / Arrow keys
-- Mine / interact: Left click (resource tiles; open chest/furnace UI)
+- Mine / interact: Left click (resource tiles; open structure UI)
 - Pick up placed structures: Hold right click on the structure
 - Crafting/inventory: E to open/close; click recipe icons to craft
 - Map: M to open/close; drag to pan; mouse wheel to zoom
 - Hotbar: 1-0 to select crafted placeables; left click to place; Esc/right click clears selection
-- Quick place: F selects furnace, C selects chest, I selects inserter, D selects mining drill
-- Rotate inserter before placement: R
+- Quick place: F selects Athanor, C selects Reliquary, I selects Brass Arm, D selects Extractor, L selects Alembic, X selects Crucible
+- Rotate Brass Arm before placement: R
 - Close UI panels: Esc or right click
 - Zoom: Mouse wheel
 

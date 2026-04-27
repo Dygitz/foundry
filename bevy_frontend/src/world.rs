@@ -121,6 +121,16 @@ pub(crate) fn open_panel_for_tile(
             object_id: cell.object_id,
         });
     }
+    if cell.kind == PLACED_ALEMBIC && cell.object_id != 0 {
+        return Some(UiMode::Alembic {
+            object_id: cell.object_id,
+        });
+    }
+    if cell.kind == PLACED_CRUCIBLE && cell.object_id != 0 {
+        return Some(UiMode::Crucible {
+            object_id: cell.object_id,
+        });
+    }
     None
 }
 
@@ -168,6 +178,32 @@ pub(crate) fn find_drill<'a>(
         .loaded
         .values()
         .find_map(|loaded| loaded.data.drills.iter().find(|d| d.object_id == object_id))
+}
+
+pub(crate) fn find_alembic<'a>(
+    runtime: &'a WorldRuntime,
+    object_id: ObjectId,
+) -> Option<&'a AlembicRecord> {
+    runtime.loaded.values().find_map(|loaded| {
+        loaded
+            .data
+            .alembics
+            .iter()
+            .find(|a| a.object_id == object_id)
+    })
+}
+
+pub(crate) fn find_crucible<'a>(
+    runtime: &'a WorldRuntime,
+    object_id: ObjectId,
+) -> Option<&'a CrucibleRecord> {
+    runtime.loaded.values().find_map(|loaded| {
+        loaded
+            .data
+            .crucibles
+            .iter()
+            .find(|c| c.object_id == object_id)
+    })
 }
 
 pub(crate) fn with_chest_mut<R>(
@@ -241,6 +277,46 @@ pub(crate) fn with_drill_mut<R>(
             .drills
             .iter()
             .any(|drill| drill.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+pub(crate) fn with_alembic_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .alembics
+            .iter()
+            .any(|alembic| alembic.object_id == object_id)
+        {
+            let result = f(&mut loaded.data);
+            let snapshot = loaded.data.clone();
+            return Some((key.clone(), snapshot, result));
+        }
+    }
+    None
+}
+
+pub(crate) fn with_crucible_mut<R>(
+    runtime: &mut WorldRuntime,
+    object_id: ObjectId,
+    mut f: impl FnMut(&mut SimChunkData) -> R,
+) -> Option<(ChunkKey, SimChunkData, R)> {
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        if loaded
+            .data
+            .crucibles
+            .iter()
+            .any(|crucible| crucible.object_id == object_id)
         {
             let result = f(&mut loaded.data);
             let snapshot = loaded.data.clone();

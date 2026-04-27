@@ -840,6 +840,14 @@ const MINING_DRILL_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
     "..kkkk..", ".kllmmk.", "kmmddmmk", "kmdccdmk", "kmmddmmk", ".kdkkdk.", ".kddddk.", "..ssss..",
 ];
 
+const ALEMBIC_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "..bbbb..", "..bggb..", ".bggllb.", "bggmmggb", "bgmaamgb", "bgmmgggb", ".bddddb.", "..ssss..",
+];
+
+const CRUCIBLE_WORLD_SPRITE: [&str; TERRAIN_TILE_PIXELS] = [
+    "..yyyy..", ".ykkkky.", "ykddddky", "ykgaagky", "ykbrrbky", ".kddddk.", ".kssssk.", "..ssss..",
+];
+
 pub(crate) fn apply_placed_sprite(
     base: [u8; 4],
     kind: PlacedId,
@@ -900,6 +908,8 @@ fn placed_sprite_rows(kind: PlacedId) -> Option<&'static [&'static str; TERRAIN_
         PLACED_CHEST => Some(&CHEST_WORLD_SPRITE),
         PLACED_INSERTER => Some(&INSERTER_WORLD_SPRITE),
         PLACED_MINING_DRILL => Some(&MINING_DRILL_WORLD_SPRITE),
+        PLACED_ALEMBIC => Some(&ALEMBIC_WORLD_SPRITE),
+        PLACED_CRUCIBLE => Some(&CRUCIBLE_WORLD_SPRITE),
         _ => None,
     }
 }
@@ -942,6 +952,27 @@ fn placed_sprite_palette(kind: PlacedId, key: u8) -> [u8; 4] {
             b's' => [22, 17, 13, 96],
             _ => [0, 0, 0, 0],
         },
+        PLACED_ALEMBIC => match key {
+            b'b' => [112, 74, 31, 255],
+            b'd' => [66, 46, 25, 255],
+            b'g' => [92, 155, 160, 205],
+            b'l' => [197, 232, 221, 225],
+            b'm' => [45, 104, 111, 225],
+            b'a' => [91, 210, 176, 245],
+            b's' => [22, 17, 13, 90],
+            _ => [0, 0, 0, 0],
+        },
+        PLACED_CRUCIBLE => match key {
+            b'k' => [43, 39, 35, 255],
+            b'd' => [88, 78, 66, 255],
+            b'y' => [205, 166, 82, 255],
+            b'g' => [84, 214, 184, 230],
+            b'a' => [232, 88, 73, 235],
+            b'b' => [108, 91, 220, 220],
+            b'r' => [236, 184, 66, 235],
+            b's' => [22, 17, 13, 96],
+            _ => [0, 0, 0, 0],
+        },
         _ => [0, 0, 0, 0],
     }
 }
@@ -952,6 +983,8 @@ pub(crate) fn placed_color(kind: PlacedId) -> [u8; 4] {
         PLACED_CHEST => [150, 95, 55, 255],
         PLACED_INSERTER => [216, 168, 54, 255],
         PLACED_MINING_DRILL => [92, 118, 126, 255],
+        PLACED_ALEMBIC => [74, 132, 126, 255],
+        PLACED_CRUCIBLE => [132, 97, 54, 255],
         _ => [0, 0, 0, 0],
     }
 }

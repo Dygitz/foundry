@@ -19,13 +19,27 @@ pub(crate) struct CraftMenuText;
 
 #[derive(Component)]
 pub(crate) struct InventoryCellButton {
-    pub(crate) item: ItemId,
+    pub(crate) slot_index: usize,
+}
+
+#[derive(Component)]
+pub(crate) struct InventoryCellIcon {
+    pub(crate) slot_index: usize,
 }
 
 #[derive(Component)]
 pub(crate) struct InventoryItemCountText {
-    pub(crate) item: ItemId,
+    pub(crate) slot_index: usize,
 }
+
+#[derive(Component)]
+pub(crate) struct InventoryScrollArea;
+
+#[derive(Component)]
+pub(crate) struct TipsScrollArea;
+
+#[derive(Component)]
+pub(crate) struct TipsScrollbarThumb;
 
 #[derive(Component)]
 pub(crate) struct RecipeButton {
@@ -212,6 +226,81 @@ pub(crate) struct DrillDepositCountText {
 
 #[derive(Component)]
 pub(crate) struct DrillProgressBar;
+
+#[derive(Component)]
+pub(crate) struct AlembicPanel;
+
+#[derive(Component)]
+pub(crate) struct AlembicSlotButton {
+    pub(crate) slot: AlembicSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicSlotIcon {
+    pub(crate) slot: AlembicSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicSlotCountText {
+    pub(crate) slot: AlembicSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicDepositButton {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicDepositIcon {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicDepositCountText {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct AlembicProgressBar;
+
+#[derive(Component)]
+pub(crate) struct CruciblePanel;
+
+#[derive(Component)]
+pub(crate) struct CrucibleSlotButton {
+    pub(crate) slot: CrucibleSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleSlotIcon {
+    pub(crate) slot: CrucibleSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleSlotCountText {
+    pub(crate) slot: CrucibleSlot,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleDepositButton {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleDepositIcon {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleDepositCountText {
+    pub(crate) item: ItemId,
+}
+
+#[derive(Component)]
+pub(crate) struct CrucibleProgressBar;
+
+#[derive(Component)]
+pub(crate) struct CrucibleFormulaText;
 
 #[derive(Component)]
 pub(crate) struct InserterPanel;

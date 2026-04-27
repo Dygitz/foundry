@@ -1,14 +1,15 @@
 use crate::errors::{Result, StorageError};
 use crate::traits::ChunkCodec;
 use simulation_core::{
-    CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT, ChestRecord, ChunkCoord, ContainerInv,
-    DrillRecord, DrillState, Entity, FurnaceRecord, FurnaceState, INSERTER_SLOT_COUNT,
-    InserterDirection, InserterInv, InserterRecord, PLACED_NONE, PlacedCell, RES_NONE,
-    ResourceCell, SimChunkData, SimChunkView, Slot, TileId,
+    AlembicRecord, AlembicState, CHEST_SLOT_COUNT, CHUNK_EDGE, CHUNK_TILE_COUNT,
+    CRUCIBLE_INPUT_SLOT_COUNT, ChestRecord, ChunkCoord, ContainerInv, CrucibleRecord,
+    CrucibleState, DrillRecord, DrillState, Entity, FurnaceRecord, FurnaceState,
+    INSERTER_SLOT_COUNT, InserterDirection, InserterInv, InserterRecord, PLACED_NONE, PlacedCell,
+    RES_NONE, ResourceCell, SimChunkData, SimChunkView, Slot, TileId,
 };
 
 const MAGIC: [u8; 4] = *b"CHNK";
-const FORMAT_VERSION: u16 = 7;
+const FORMAT_VERSION: u16 = 9;
 const FLAGS_NONE: u16 = 0;
 const BYTES_PER_ENTITY: usize = 12;
 const BYTES_PER_RESOURCE: usize = 3;
@@ -20,6 +21,8 @@ const BYTES_PER_FURNACE: usize = 8 + (3 * BYTES_PER_SLOT) + 2;
 const BYTES_PER_INSERTER_V5: usize = 8 + (INSERTER_SLOT_COUNT * BYTES_PER_SLOT);
 const BYTES_PER_INSERTER: usize = 8 + 1 + (INSERTER_SLOT_COUNT * BYTES_PER_SLOT);
 const BYTES_PER_DRILL: usize = 8 + (2 * BYTES_PER_SLOT) + 2;
+const BYTES_PER_ALEMBIC: usize = 8 + (2 * BYTES_PER_SLOT) + 2;
+const BYTES_PER_CRUCIBLE: usize = 8 + ((CRUCIBLE_INPUT_SLOT_COUNT + 1) * BYTES_PER_SLOT) + 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkCodecV1 {
@@ -62,7 +65,7 @@ impl ChunkCodec for ChunkCodecV1 {
         }
 
         // NOTE: checksum is computed by the storage layer, not the codec.
-        let payload = encode_payload_v7(chunk)?;
+        let payload = encode_payload_v9(chunk)?;
         let payload_len = u32::try_from(payload.len())
             .map_err(|_| StorageError::Other("payload length exceeds u32::MAX".to_string()))?;
 
@@ -92,14 +95,7 @@ impl ChunkCodec for ChunkCodecV1 {
         }
 
         let format_version = reader.read_u16()?;
-        if format_version != FORMAT_VERSION
-            && format_version != 1
-            && format_version != 2
-            && format_version != 3
-            && format_version != 4
-            && format_version != 5
-            && format_version != 6
-        {
+        if !(1..=FORMAT_VERSION).contains(&format_version) {
             return Err(StorageError::DecodeFailed(format!(
                 "unsupported chunk format version {format_version}"
             )));
@@ -133,84 +129,106 @@ impl ChunkCodec for ChunkCodecV1 {
         }
 
         let payload_bytes = reader.take(payload_len)?;
-        let (tiles, entities, resources, placed, chests, furnaces, inserters, drills) =
-            if format_version == 1 {
-                let (tiles, entities) = decode_payload_v1(payload_bytes)?;
-                let resources = vec![
-                    ResourceCell {
-                        kind: RES_NONE,
-                        amount: 0
-                    };
-                    CHUNK_TILE_COUNT
-                ];
-                let placed = vec![
-                    PlacedCell {
-                        kind: PLACED_NONE,
-                        object_id: 0,
-                    };
-                    CHUNK_TILE_COUNT
-                ];
-                (
-                    tiles,
-                    entities,
-                    resources,
-                    placed,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else if format_version == 2 {
-                let (tiles, entities, resources) = decode_payload_v2(payload_bytes)?;
-                let placed = vec![
-                    PlacedCell {
-                        kind: PLACED_NONE,
-                        object_id: 0,
-                    };
-                    CHUNK_TILE_COUNT
-                ];
-                (
-                    tiles,
-                    entities,
-                    resources,
-                    placed,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else if format_version == 3 {
-                let (tiles, entities, resources, placed) = decode_payload_v3(payload_bytes)?;
-                (
-                    tiles,
-                    entities,
-                    resources,
-                    placed,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else if format_version == 4 {
-                let (tiles, entities, resources, placed, chests, furnaces) =
-                    decode_payload_v4(payload_bytes)?;
-                (
-                    tiles,
-                    entities,
-                    resources,
-                    placed,
-                    chests,
-                    furnaces,
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else if format_version == 5 {
-                decode_payload_v5_to_v7(payload_bytes, false, false)?
-            } else if format_version == 6 {
-                decode_payload_v5_to_v7(payload_bytes, true, false)?
-            } else {
-                decode_payload_v5_to_v7(payload_bytes, true, true)?
-            };
+        let (
+            tiles,
+            entities,
+            resources,
+            placed,
+            chests,
+            furnaces,
+            inserters,
+            drills,
+            alembics,
+            crucibles,
+        ) = if format_version == 1 {
+            let (tiles, entities) = decode_payload_v1(payload_bytes)?;
+            let resources = vec![
+                ResourceCell {
+                    kind: RES_NONE,
+                    amount: 0
+                };
+                CHUNK_TILE_COUNT
+            ];
+            let placed = vec![
+                PlacedCell {
+                    kind: PLACED_NONE,
+                    object_id: 0,
+                };
+                CHUNK_TILE_COUNT
+            ];
+            (
+                tiles,
+                entities,
+                resources,
+                placed,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else if format_version == 2 {
+            let (tiles, entities, resources) = decode_payload_v2(payload_bytes)?;
+            let placed = vec![
+                PlacedCell {
+                    kind: PLACED_NONE,
+                    object_id: 0,
+                };
+                CHUNK_TILE_COUNT
+            ];
+            (
+                tiles,
+                entities,
+                resources,
+                placed,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else if format_version == 3 {
+            let (tiles, entities, resources, placed) = decode_payload_v3(payload_bytes)?;
+            (
+                tiles,
+                entities,
+                resources,
+                placed,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else if format_version == 4 {
+            let (tiles, entities, resources, placed, chests, furnaces) =
+                decode_payload_v4(payload_bytes)?;
+            (
+                tiles,
+                entities,
+                resources,
+                placed,
+                chests,
+                furnaces,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else if format_version == 5 {
+            decode_payload_v5_to_v9(payload_bytes, false, false, false, false)?
+        } else if format_version == 6 {
+            decode_payload_v5_to_v9(payload_bytes, true, false, false, false)?
+        } else if format_version == 7 {
+            decode_payload_v5_to_v9(payload_bytes, true, true, false, false)?
+        } else if format_version == 8 {
+            decode_payload_v5_to_v9(payload_bytes, true, true, true, false)?
+        } else {
+            decode_payload_v5_to_v9(payload_bytes, true, true, true, true)?
+        };
 
         Ok(SimChunkData {
             coord: ChunkCoord { cx, cy },
@@ -222,6 +240,8 @@ impl ChunkCodec for ChunkCodecV1 {
             furnaces,
             inserters,
             drills,
+            alembics,
+            crucibles,
             entities,
             saved_tick,
         })
@@ -318,6 +338,38 @@ fn encode_payload_v7(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
         encode_slot(&mut buffer, &drill.state.fuel);
         encode_slot(&mut buffer, &drill.state.output);
         buffer.extend_from_slice(&drill.state.progress.to_le_bytes());
+    }
+    Ok(buffer)
+}
+
+fn encode_payload_v8(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
+    let mut buffer = encode_payload_v7(chunk)?;
+    let alembic_count = u32::try_from(chunk.alembics.len())
+        .map_err(|_| StorageError::Other("alembic count exceeds u32::MAX".to_string()))?;
+    buffer.reserve(4 + (chunk.alembics.len() * BYTES_PER_ALEMBIC));
+    buffer.extend_from_slice(&alembic_count.to_le_bytes());
+    for alembic in chunk.alembics {
+        buffer.extend_from_slice(&alembic.object_id.to_le_bytes());
+        encode_slot(&mut buffer, &alembic.state.input);
+        encode_slot(&mut buffer, &alembic.state.output);
+        buffer.extend_from_slice(&alembic.state.progress.to_le_bytes());
+    }
+    Ok(buffer)
+}
+
+fn encode_payload_v9(chunk: &SimChunkView<'_>) -> Result<Vec<u8>> {
+    let mut buffer = encode_payload_v8(chunk)?;
+    let crucible_count = u32::try_from(chunk.crucibles.len())
+        .map_err(|_| StorageError::Other("crucible count exceeds u32::MAX".to_string()))?;
+    buffer.reserve(4 + (chunk.crucibles.len() * BYTES_PER_CRUCIBLE));
+    buffer.extend_from_slice(&crucible_count.to_le_bytes());
+    for crucible in chunk.crucibles {
+        buffer.extend_from_slice(&crucible.object_id.to_le_bytes());
+        for input in &crucible.state.inputs {
+            encode_slot(&mut buffer, input);
+        }
+        encode_slot(&mut buffer, &crucible.state.output);
+        buffer.extend_from_slice(&crucible.state.progress.to_le_bytes());
     }
     Ok(buffer)
 }
@@ -644,10 +696,12 @@ fn decode_payload_v4(
     Ok((tiles, entities, resources, placed, chests, furnaces))
 }
 
-fn decode_payload_v5_to_v7(
+fn decode_payload_v5_to_v9(
     bytes: &[u8],
     has_inserter_direction: bool,
     has_drills: bool,
+    has_alembics: bool,
+    has_crucibles: bool,
 ) -> Result<(
     Vec<TileId>,
     Vec<Entity>,
@@ -657,6 +711,8 @@ fn decode_payload_v5_to_v7(
     Vec<FurnaceRecord>,
     Vec<InserterRecord>,
     Vec<DrillRecord>,
+    Vec<AlembicRecord>,
+    Vec<CrucibleRecord>,
 )> {
     let mut reader = Reader::new(bytes);
 
@@ -825,6 +881,63 @@ fn decode_payload_v5_to_v7(
         Vec::new()
     };
 
+    let alembics = if has_alembics {
+        let alembic_count = reader.read_u32()? as usize;
+        if alembic_count > 0 && alembic_count > reader.remaining() / BYTES_PER_ALEMBIC {
+            return Err(StorageError::DecodeFailed(
+                "alembic count exceeds payload size".to_string(),
+            ));
+        }
+        let mut alembics = Vec::with_capacity(alembic_count);
+        for _ in 0..alembic_count {
+            let object_id = reader.read_u64()?;
+            let input = decode_slot(&mut reader)?;
+            let output = decode_slot(&mut reader)?;
+            let progress = reader.read_u16()?;
+            alembics.push(AlembicRecord {
+                object_id,
+                state: AlembicState {
+                    input,
+                    output,
+                    progress,
+                },
+            });
+        }
+        alembics
+    } else {
+        Vec::new()
+    };
+
+    let crucibles = if has_crucibles {
+        let crucible_count = reader.read_u32()? as usize;
+        if crucible_count > 0 && crucible_count > reader.remaining() / BYTES_PER_CRUCIBLE {
+            return Err(StorageError::DecodeFailed(
+                "crucible count exceeds payload size".to_string(),
+            ));
+        }
+        let mut crucibles = Vec::with_capacity(crucible_count);
+        for _ in 0..crucible_count {
+            let object_id = reader.read_u64()?;
+            let mut inputs = [Slot::default(); CRUCIBLE_INPUT_SLOT_COUNT];
+            for input in &mut inputs {
+                *input = decode_slot(&mut reader)?;
+            }
+            let output = decode_slot(&mut reader)?;
+            let progress = reader.read_u16()?;
+            crucibles.push(CrucibleRecord {
+                object_id,
+                state: CrucibleState {
+                    inputs,
+                    output,
+                    progress,
+                },
+            });
+        }
+        crucibles
+    } else {
+        Vec::new()
+    };
+
     if reader.remaining() != 0 {
         return Err(StorageError::DecodeFailed(
             "payload has trailing bytes".to_string(),
@@ -832,7 +945,8 @@ fn decode_payload_v5_to_v7(
     }
 
     Ok((
-        tiles, entities, resources, placed, chests, furnaces, inserters, drills,
+        tiles, entities, resources, placed, chests, furnaces, inserters, drills, alembics,
+        crucibles,
     ))
 }
 

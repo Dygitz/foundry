@@ -2,6 +2,7 @@ use crate::{ITEM_COAL, ITEM_NONE, ItemId, ObjectId};
 
 pub const CHEST_SLOT_COUNT: usize = 16;
 pub const INSERTER_SLOT_COUNT: usize = 4;
+pub const CRUCIBLE_INPUT_SLOT_COUNT: usize = 4;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Slot {
@@ -186,6 +187,52 @@ pub struct DrillRecord {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AlembicState {
+    pub input: Slot,
+    pub output: Slot,
+    pub progress: u16,
+}
+
+impl Default for AlembicState {
+    fn default() -> Self {
+        Self {
+            input: Slot::default(),
+            output: Slot::default(),
+            progress: 0,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AlembicRecord {
+    pub object_id: ObjectId,
+    pub state: AlembicState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct CrucibleState {
+    pub inputs: [Slot; CRUCIBLE_INPUT_SLOT_COUNT],
+    pub output: Slot,
+    pub progress: u16,
+}
+
+impl Default for CrucibleState {
+    fn default() -> Self {
+        Self {
+            inputs: [Slot::default(); CRUCIBLE_INPUT_SLOT_COUNT],
+            output: Slot::default(),
+            progress: 0,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct CrucibleRecord {
+    pub object_id: ObjectId,
+    pub state: CrucibleState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct InserterRecord {
     pub object_id: ObjectId,
     pub direction: InserterDirection,
@@ -202,6 +249,18 @@ pub enum FurnaceSlot {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DrillSlot {
     Fuel,
+    Output,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AlembicSlot {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CrucibleSlot {
+    Input(usize),
     Output,
 }
 
@@ -346,6 +405,78 @@ pub fn deposit_to_drill_fuel(
         return 0;
     };
     deposit_to_slot(&mut drill.state.fuel, item, amount)
+}
+
+pub fn take_from_alembic(
+    alembics: &mut [AlembicRecord],
+    object_id: ObjectId,
+    slot_kind: AlembicSlot,
+    amount: u32,
+) -> Option<Slot> {
+    let alembic = alembics
+        .iter_mut()
+        .find(|alembic| alembic.object_id == object_id)?;
+    let slot = match slot_kind {
+        AlembicSlot::Input => &mut alembic.state.input,
+        AlembicSlot::Output => &mut alembic.state.output,
+    };
+    take_from_slot(slot, amount)
+}
+
+pub fn deposit_to_alembic_input(
+    alembics: &mut [AlembicRecord],
+    object_id: ObjectId,
+    item: ItemId,
+    amount: u32,
+) -> u32 {
+    let alembic = alembics
+        .iter_mut()
+        .find(|alembic| alembic.object_id == object_id);
+    let Some(alembic) = alembic else {
+        return 0;
+    };
+    deposit_to_slot(&mut alembic.state.input, item, amount)
+}
+
+pub fn take_from_crucible(
+    crucibles: &mut [CrucibleRecord],
+    object_id: ObjectId,
+    slot_kind: CrucibleSlot,
+    amount: u32,
+) -> Option<Slot> {
+    let crucible = crucibles
+        .iter_mut()
+        .find(|crucible| crucible.object_id == object_id)?;
+    let slot = match slot_kind {
+        CrucibleSlot::Input(index) => crucible.state.inputs.get_mut(index)?,
+        CrucibleSlot::Output => &mut crucible.state.output,
+    };
+    take_from_slot(slot, amount)
+}
+
+pub fn deposit_to_crucible_input(
+    crucibles: &mut [CrucibleRecord],
+    object_id: ObjectId,
+    item: ItemId,
+    amount: u32,
+) -> u32 {
+    let crucible = crucibles
+        .iter_mut()
+        .find(|crucible| crucible.object_id == object_id);
+    let Some(crucible) = crucible else {
+        return 0;
+    };
+    for slot in &mut crucible.state.inputs {
+        if slot.item == item && !slot.is_empty() {
+            return deposit_to_slot(slot, item, amount);
+        }
+    }
+    for slot in &mut crucible.state.inputs {
+        if slot.is_empty() {
+            return deposit_to_slot(slot, item, amount);
+        }
+    }
+    0
 }
 
 pub fn take_from_inserter(

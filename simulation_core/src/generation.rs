@@ -41,6 +41,8 @@ pub fn generate_chunk_data(
         furnaces: Vec::new(),
         inserters: Vec::new(),
         drills: Vec::new(),
+        alembics: Vec::new(),
+        crucibles: Vec::new(),
         entities: Vec::new(),
         saved_tick,
     }

@@ -1,8 +1,10 @@
 use super::*;
 use crate::ChunkCodec;
 use simulation_core::{
-    CHUNK_TILE_COUNT, DrillRecord, DrillState, Entity, FurnaceSlot, ITEM_COAL, ITEM_COPPER_ORE,
-    ITEM_IRON_ORE, ITEM_STONE, InserterDirection, InserterInv, InserterRecord, PLACED_CHEST,
+    AlembicRecord, AlembicState, CHUNK_TILE_COUNT, CrucibleRecord, CrucibleState, DrillRecord,
+    DrillState, Entity, FurnaceSlot, ITEM_COAL, ITEM_COPPER_ORE, ITEM_CUPRIC_ESSENCE,
+    ITEM_FERRIC_ESSENCE, ITEM_IRON_ORE, ITEM_LODESTONE, ITEM_MINERAL_ESSENCE, ITEM_STONE,
+    InserterDirection, InserterInv, InserterRecord, PLACED_ALEMBIC, PLACED_CHEST, PLACED_CRUCIBLE,
     PLACED_INSERTER, PLACED_MINING_DRILL, RES_IRON,
 };
 
@@ -40,6 +42,14 @@ fn sample_chunk() -> SimChunkData {
     placed[7] = PlacedCell {
         kind: PLACED_MINING_DRILL,
         object_id: 102,
+    };
+    placed[8] = PlacedCell {
+        kind: PLACED_ALEMBIC,
+        object_id: 103,
+    };
+    placed[9] = PlacedCell {
+        kind: PLACED_CRUCIBLE,
+        object_id: 104,
     };
 
     let mut chest_inv = ContainerInv::default();
@@ -102,6 +112,42 @@ fn sample_chunk() -> SimChunkData {
                 progress: 77,
             },
         }],
+        alembics: vec![AlembicRecord {
+            object_id: 103,
+            state: AlembicState {
+                input: Slot {
+                    item: ITEM_COPPER_ORE,
+                    count: 4,
+                },
+                output: Slot {
+                    item: ITEM_CUPRIC_ESSENCE,
+                    count: 1,
+                },
+                progress: 91,
+            },
+        }],
+        crucibles: vec![CrucibleRecord {
+            object_id: 104,
+            state: CrucibleState {
+                inputs: [
+                    Slot {
+                        item: ITEM_FERRIC_ESSENCE,
+                        count: 2,
+                    },
+                    Slot {
+                        item: ITEM_MINERAL_ESSENCE,
+                        count: 2,
+                    },
+                    Slot::default(),
+                    Slot::default(),
+                ],
+                output: Slot {
+                    item: ITEM_LODESTONE,
+                    count: 1,
+                },
+                progress: 57,
+            },
+        }],
         entities: vec![Entity {
             id: 7,
             kind: 2,
@@ -113,7 +159,7 @@ fn sample_chunk() -> SimChunkData {
 }
 
 #[test]
-fn round_trips_v7_chunk_payload() {
+fn round_trips_v9_chunk_payload() {
     let codec = ChunkCodecV1::default();
     let chunk = sample_chunk();
 
@@ -129,6 +175,8 @@ fn round_trips_v7_chunk_payload() {
     assert_eq!(decoded.furnaces, chunk.furnaces);
     assert_eq!(decoded.inserters, chunk.inserters);
     assert_eq!(decoded.drills, chunk.drills);
+    assert_eq!(decoded.alembics, chunk.alembics);
+    assert_eq!(decoded.crucibles, chunk.crucibles);
     assert_eq!(decoded.entities, chunk.entities);
     assert_eq!(decoded.saved_tick, 123);
 }

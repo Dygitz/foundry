@@ -1,5 +1,8 @@
 use super::*;
-use crate::{ITEM_COAL, ITEM_IRON_ORE, ITEM_STONE};
+use crate::{
+    ITEM_COAL, ITEM_COPPER_ORE, ITEM_CUPRIC_ESSENCE, ITEM_FERRIC_ESSENCE, ITEM_IRON_ORE,
+    ITEM_LODESTONE, ITEM_MINERAL_ESSENCE, ITEM_STONE,
+};
 
 #[test]
 fn chest_deposit_uses_first_available_stack() {
@@ -101,4 +104,66 @@ fn drill_fuel_and_output_are_separate_slots() {
     assert_eq!(output.count, 3);
     assert_eq!(drills[0].state.fuel.count, 1);
     assert!(drills[0].state.output.is_empty());
+}
+
+#[test]
+fn alembic_input_and_output_are_separate_slots() {
+    let mut alembics = [AlembicRecord {
+        object_id: 17,
+        state: AlembicState::default(),
+    }];
+
+    assert_eq!(
+        deposit_to_alembic_input(&mut alembics, 17, ITEM_COPPER_ORE, 2),
+        2
+    );
+    alembics[0].state.output = Slot {
+        item: ITEM_CUPRIC_ESSENCE,
+        count: 1,
+    };
+
+    let input = take_from_alembic(&mut alembics, 17, AlembicSlot::Input, 1).unwrap();
+    let output = take_from_alembic(&mut alembics, 17, AlembicSlot::Output, u32::MAX).unwrap();
+
+    assert_eq!(input.item, ITEM_COPPER_ORE);
+    assert_eq!(input.count, 1);
+    assert_eq!(output.item, ITEM_CUPRIC_ESSENCE);
+    assert_eq!(output.count, 1);
+    assert_eq!(alembics[0].state.input.count, 1);
+    assert!(alembics[0].state.output.is_empty());
+}
+
+#[test]
+fn crucible_inputs_stack_and_output_can_be_taken() {
+    let mut crucibles = [CrucibleRecord {
+        object_id: 19,
+        state: CrucibleState::default(),
+    }];
+
+    assert_eq!(
+        deposit_to_crucible_input(&mut crucibles, 19, ITEM_FERRIC_ESSENCE, 1),
+        1
+    );
+    assert_eq!(
+        deposit_to_crucible_input(&mut crucibles, 19, ITEM_MINERAL_ESSENCE, 1),
+        1
+    );
+    assert_eq!(
+        deposit_to_crucible_input(&mut crucibles, 19, ITEM_FERRIC_ESSENCE, 2),
+        2
+    );
+    crucibles[0].state.output = Slot {
+        item: ITEM_LODESTONE,
+        count: 1,
+    };
+
+    let input = take_from_crucible(&mut crucibles, 19, CrucibleSlot::Input(0), 1).unwrap();
+    let output = take_from_crucible(&mut crucibles, 19, CrucibleSlot::Output, u32::MAX).unwrap();
+
+    assert_eq!(input.item, ITEM_FERRIC_ESSENCE);
+    assert_eq!(input.count, 1);
+    assert_eq!(crucibles[0].state.inputs[0].count, 2);
+    assert_eq!(output.item, ITEM_LODESTONE);
+    assert_eq!(output.count, 1);
+    assert!(crucibles[0].state.output.is_empty());
 }

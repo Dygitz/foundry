@@ -26,6 +26,8 @@ impl Plugin for FoundryGameplayPlugin {
                 chest_button_system,
                 furnace_button_system,
                 drill_button_system,
+                alembic_button_system,
+                crucible_button_system,
                 inserter_button_system,
             )
                 .in_set(UpdateSet::Ui),
@@ -35,6 +37,8 @@ impl Plugin for FoundryGameplayPlugin {
             (
                 furnace_smelting_system,
                 mining_drill_system,
+                alembic_distillation_system,
+                crucible_transmutation_system,
                 inserter_transfer_system,
             )
                 .chain()
@@ -63,6 +67,12 @@ pub(crate) fn placement_select_system(
     }
     if keys.just_pressed(KeyCode::KeyD) && player.inventory.count(ITEM_MINING_DRILL) > 0 {
         placement.selected = Some(ITEM_MINING_DRILL);
+    }
+    if keys.just_pressed(KeyCode::KeyL) && player.inventory.count(ITEM_ALEMBIC) > 0 {
+        placement.selected = Some(ITEM_ALEMBIC);
+    }
+    if keys.just_pressed(KeyCode::KeyX) && player.inventory.count(ITEM_CRUCIBLE) > 0 {
+        placement.selected = Some(ITEM_CRUCIBLE);
     }
     if keys.just_pressed(KeyCode::KeyR) && placement.selected == Some(ITEM_INSERTER) {
         placement.inserter_direction = placement.inserter_direction.next_clockwise();
@@ -373,6 +383,8 @@ pub(crate) fn mining_input_system(
 
 pub(crate) const FURNACE_PROGRESS_BAR_WIDTH: f32 = 252.0;
 pub(crate) const MINING_DRILL_PROGRESS_BAR_WIDTH: f32 = 252.0;
+pub(crate) const ALEMBIC_PROGRESS_BAR_WIDTH: f32 = 252.0;
+pub(crate) const CRUCIBLE_PROGRESS_BAR_WIDTH: f32 = 252.0;
 
 pub(crate) fn recipe_detail_label(recipe: &Recipe, inv: &Inventory) -> String {
     let mut label = format!(
@@ -545,6 +557,17 @@ pub(crate) fn try_pick_up_structure(
             return false;
         }
 
+        let mut preview_data = loaded.data.clone();
+        let preview_pickups =
+            collect_structure_pickup_items(&mut preview_data, current.kind, current.object_id);
+        let mut simulated_inventory = player.inventory.clone();
+        if preview_pickups
+            .iter()
+            .any(|(item, amount)| simulated_inventory.add(*item, *amount) != *amount)
+        {
+            return false;
+        }
+
         let pickups =
             collect_structure_pickup_items(&mut loaded.data, current.kind, current.object_id);
         let Some(cell) = loaded.data.placed.get_mut(idx) else {
@@ -643,6 +666,28 @@ fn collect_structure_pickup_items(
             push_slot_pickup(&mut pickups, drill.state.fuel);
             push_slot_pickup(&mut pickups, drill.state.output);
         }
+    } else if kind == PLACED_ALEMBIC {
+        if let Some(index) = data
+            .alembics
+            .iter()
+            .position(|alembic| alembic.object_id == object_id)
+        {
+            let alembic = data.alembics.remove(index);
+            push_slot_pickup(&mut pickups, alembic.state.input);
+            push_slot_pickup(&mut pickups, alembic.state.output);
+        }
+    } else if kind == PLACED_CRUCIBLE {
+        if let Some(index) = data
+            .crucibles
+            .iter()
+            .position(|crucible| crucible.object_id == object_id)
+        {
+            let crucible = data.crucibles.remove(index);
+            for slot in crucible.state.inputs {
+                push_slot_pickup(&mut pickups, slot);
+            }
+            push_slot_pickup(&mut pickups, crucible.state.output);
+        }
     }
 
     pickups
@@ -672,6 +717,8 @@ pub(crate) enum TransferEndpoint {
     Chest { object_id: ObjectId },
     Furnace { object_id: ObjectId },
     Drill { object_id: ObjectId },
+    Alembic { object_id: ObjectId },
+    Crucible { object_id: ObjectId },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -686,6 +733,12 @@ pub(crate) enum TransferSource {
     DrillOutput {
         object_id: ObjectId,
     },
+    AlembicOutput {
+        object_id: ObjectId,
+    },
+    CrucibleOutput {
+        object_id: ObjectId,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -694,6 +747,8 @@ pub(crate) enum TransferTarget {
     FurnaceInput { object_id: ObjectId },
     FurnaceFuel { object_id: ObjectId },
     DrillFuel { object_id: ObjectId },
+    AlembicInput { object_id: ObjectId },
+    CrucibleInput { object_id: ObjectId },
 }
 
 pub(crate) fn inserter_transfer_system(
@@ -820,6 +875,12 @@ pub(crate) fn transfer_endpoint_at(
         PLACED_MINING_DRILL if cell.object_id != 0 => Some(TransferEndpoint::Drill {
             object_id: cell.object_id,
         }),
+        PLACED_ALEMBIC if cell.object_id != 0 => Some(TransferEndpoint::Alembic {
+            object_id: cell.object_id,
+        }),
+        PLACED_CRUCIBLE if cell.object_id != 0 => Some(TransferEndpoint::Crucible {
+            object_id: cell.object_id,
+        }),
         _ => None,
     }
 }
@@ -914,6 +975,36 @@ fn best_target_for_item(
         }
     }
 
+    if essence_output_for_input(item).is_some() {
+        for endpoint in endpoints {
+            if Some(*endpoint) == exclude {
+                continue;
+            }
+            let TransferEndpoint::Alembic { object_id } = *endpoint else {
+                continue;
+            };
+            let target = TransferTarget::AlembicInput { object_id };
+            if target_can_accept(runtime, target, item) {
+                return Some(target);
+            }
+        }
+    }
+
+    if is_essence_item(item) {
+        for endpoint in endpoints {
+            if Some(*endpoint) == exclude {
+                continue;
+            }
+            let TransferEndpoint::Crucible { object_id } = *endpoint else {
+                continue;
+            };
+            let target = TransferTarget::CrucibleInput { object_id };
+            if target_can_accept(runtime, target, item) {
+                return Some(target);
+            }
+        }
+    }
+
     for endpoint in endpoints {
         if Some(*endpoint) == exclude {
             continue;
@@ -958,6 +1049,30 @@ fn best_pull_source(
                 && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
             {
                 return Some(TransferSource::DrillOutput { object_id });
+            }
+        }
+    }
+
+    if let TransferEndpoint::Alembic { object_id } = source_endpoint {
+        if let Some(alembic) = find_alembic(runtime, object_id) {
+            let output = alembic.state.output;
+            if !output.is_empty()
+                && inserter_can_accept(runtime, inserter_id, output.item)
+                && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
+            {
+                return Some(TransferSource::AlembicOutput { object_id });
+            }
+        }
+    }
+
+    if let TransferEndpoint::Crucible { object_id } = source_endpoint {
+        if let Some(crucible) = find_crucible(runtime, object_id) {
+            let output = crucible.state.output;
+            if !output.is_empty()
+                && inserter_can_accept(runtime, inserter_id, output.item)
+                && best_target_for_item(runtime, &target_endpoints, output.item, None).is_some()
+            {
+                return Some(TransferSource::CrucibleOutput { object_id });
             }
         }
     }
@@ -1041,6 +1156,28 @@ fn target_can_accept(runtime: &WorldRuntime, target: TransferTarget, item: ItemI
                     slot_can_accept(drill.state.fuel, item)
                         && (drill.state.fuel.is_empty()
                             || drill.state.fuel.count < DRILL_FUEL_BUFFER)
+                })
+                .unwrap_or(false)
+        }
+        TransferTarget::AlembicInput { object_id } => {
+            if essence_output_for_input(item).is_none() {
+                return false;
+            }
+            find_alembic(runtime, object_id)
+                .map(|alembic| slot_can_accept(alembic.state.input, item))
+                .unwrap_or(false)
+        }
+        TransferTarget::CrucibleInput { object_id } => {
+            if !is_essence_item(item) {
+                return false;
+            }
+            find_crucible(runtime, object_id)
+                .map(|crucible| {
+                    crucible
+                        .state
+                        .inputs
+                        .iter()
+                        .any(|slot| slot_can_accept(*slot, item))
                 })
                 .unwrap_or(false)
         }
@@ -1158,6 +1295,18 @@ fn take_from_transfer_source(
             take_from_drill(&mut data.drills, object_id, DrillSlot::Output, 1)
         })
         .and_then(|(key, _, slot)| slot.map(|slot| (key, slot))),
+        TransferSource::AlembicOutput { object_id } => {
+            with_alembic_mut(runtime, object_id, |data| {
+                take_from_alembic(&mut data.alembics, object_id, AlembicSlot::Output, 1)
+            })
+            .and_then(|(key, _, slot)| slot.map(|slot| (key, slot)))
+        }
+        TransferSource::CrucibleOutput { object_id } => {
+            with_crucible_mut(runtime, object_id, |data| {
+                take_from_crucible(&mut data.crucibles, object_id, CrucibleSlot::Output, 1)
+            })
+            .and_then(|(key, _, slot)| slot.map(|slot| (key, slot)))
+        }
     }
 }
 
@@ -1196,6 +1345,24 @@ fn deposit_to_transfer_target(
             }
             with_drill_mut(runtime, object_id, |data| {
                 deposit_to_drill_fuel(&mut data.drills, object_id, item, amount)
+            })
+            .map(|(key, _, moved)| (key, moved))
+        }
+        TransferTarget::AlembicInput { object_id } => {
+            if essence_output_for_input(item).is_none() {
+                return None;
+            }
+            with_alembic_mut(runtime, object_id, |data| {
+                deposit_to_alembic_input(&mut data.alembics, object_id, item, amount)
+            })
+            .map(|(key, _, moved)| (key, moved))
+        }
+        TransferTarget::CrucibleInput { object_id } => {
+            if !is_essence_item(item) {
+                return None;
+            }
+            with_crucible_mut(runtime, object_id, |data| {
+                deposit_to_crucible_input(&mut data.crucibles, object_id, item, amount)
             })
             .map(|(key, _, moved)| (key, moved))
         }
@@ -1255,6 +1422,30 @@ fn restore_transfer_source(runtime: &mut WorldRuntime, source: TransferSource, s
                     return 0;
                 };
                 deposit_to_slot_unchecked(&mut drill.state.output, slot.item, slot.count)
+            });
+        }
+        TransferSource::AlembicOutput { object_id } => {
+            let _ = with_alembic_mut(runtime, object_id, |data| {
+                let Some(alembic) = data
+                    .alembics
+                    .iter_mut()
+                    .find(|alembic| alembic.object_id == object_id)
+                else {
+                    return 0;
+                };
+                deposit_to_slot_unchecked(&mut alembic.state.output, slot.item, slot.count)
+            });
+        }
+        TransferSource::CrucibleOutput { object_id } => {
+            let _ = with_crucible_mut(runtime, object_id, |data| {
+                let Some(crucible) = data
+                    .crucibles
+                    .iter_mut()
+                    .find(|crucible| crucible.object_id == object_id)
+                else {
+                    return 0;
+                };
+                deposit_to_slot_unchecked(&mut crucible.state.output, slot.item, slot.count)
             });
         }
     }
@@ -1402,6 +1593,11 @@ pub(crate) fn try_mine_tile(
         }
 
         let mined_kind = cell.kind;
+        if let Some(item) = resource_to_item(mined_kind) {
+            if !player.inventory.can_add(item, 1) {
+                return MineAttempt::Empty;
+            }
+        }
         cell.amount = cell.amount.saturating_sub(1);
         if cell.amount == 0 {
             cell.kind = RES_NONE;
@@ -1655,6 +1851,30 @@ pub(crate) fn try_place_tile(
                     state: DrillState::default(),
                 });
             }
+        } else if placed_kind == PLACED_ALEMBIC {
+            if !loaded
+                .data
+                .alembics
+                .iter()
+                .any(|alembic| alembic.object_id == object_id)
+            {
+                loaded.data.alembics.push(AlembicRecord {
+                    object_id,
+                    state: AlembicState::default(),
+                });
+            }
+        } else if placed_kind == PLACED_CRUCIBLE {
+            if !loaded
+                .data
+                .crucibles
+                .iter()
+                .any(|crucible| crucible.object_id == object_id)
+            {
+                loaded.data.crucibles.push(CrucibleRecord {
+                    object_id,
+                    state: CrucibleState::default(),
+                });
+            }
         }
         (loaded.texture_handle.clone(), loaded.data.clone())
     };
@@ -1735,6 +1955,13 @@ pub(crate) fn chest_button_system(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let slot = find_chest(&runtime, object_id)
+            .and_then(|chest| chest.inv.slots.get(button.index))
+            .copied()
+            .unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
+            continue;
+        }
         let result = with_chest_mut(&mut runtime, object_id, |data| {
             take_from_chest(&mut data.chests, object_id, button.index, u32::MAX)
         });
@@ -1804,6 +2031,10 @@ pub(crate) fn furnace_button_system(
 
     for (interaction, button) in &mut slot_buttons {
         if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let slot = furnace_slot(find_furnace(&runtime, object_id), button.slot).unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
             continue;
         }
         let result = with_furnace_mut(&mut runtime, object_id, |data| {
@@ -1883,6 +2114,10 @@ pub(crate) fn drill_button_system(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let slot = drill_slot(find_drill(&runtime, object_id), button.slot).unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
+            continue;
+        }
         let result = with_drill_mut(&mut runtime, object_id, |data| {
             take_from_drill(&mut data.drills, object_id, button.slot, u32::MAX)
         });
@@ -1934,6 +2169,157 @@ pub(crate) fn drill_button_system(
     }
 }
 
+pub(crate) fn alembic_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &AlembicSlotButton), Changed<Interaction>>,
+    mut deposit_buttons: Query<(&Interaction, &AlembicDepositButton), Changed<Interaction>>,
+) {
+    let UiMode::Alembic { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let slot = alembic_slot(find_alembic(&runtime, object_id), button.slot).unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
+            continue;
+        }
+        let result = with_alembic_mut(&mut runtime, object_id, |data| {
+            take_from_alembic(&mut data.alembics, object_id, button.slot, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+
+    for (interaction, button) in &mut deposit_buttons {
+        if *interaction != Interaction::Pressed || essence_output_for_input(button.item).is_none() {
+            continue;
+        }
+        let amount = player.inventory.count(button.item);
+        if amount == 0 {
+            continue;
+        }
+        let result = with_alembic_mut(&mut runtime, object_id, |data| {
+            deposit_to_alembic_input(&mut data.alembics, object_id, button.item, amount)
+        });
+        if let Some((key, snapshot, moved)) = result {
+            if moved > 0 {
+                let _ = player.inventory.try_remove(button.item, moved);
+                runtime.touch(&key);
+                queue_chunk_save(
+                    &key,
+                    &snapshot,
+                    &services,
+                    &session,
+                    &time,
+                    &mut runtime,
+                    &mut queue,
+                    &mut status,
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn crucible_button_system(
+    ui_state: Res<UiState>,
+    mut runtime: ResMut<WorldRuntime>,
+    mut player: ResMut<PlayerState>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    time: Res<Time>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+    mut slot_buttons: Query<(&Interaction, &CrucibleSlotButton), Changed<Interaction>>,
+    mut deposit_buttons: Query<(&Interaction, &CrucibleDepositButton), Changed<Interaction>>,
+) {
+    let UiMode::Crucible { object_id } = ui_state.mode else {
+        return;
+    };
+
+    for (interaction, button) in &mut slot_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let slot =
+            crucible_slot(find_crucible(&runtime, object_id), button.slot).unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
+            continue;
+        }
+        let result = with_crucible_mut(&mut runtime, object_id, |data| {
+            take_from_crucible(&mut data.crucibles, object_id, button.slot, u32::MAX)
+        });
+        if let Some((key, snapshot, Some(slot))) = result {
+            if slot.item != ITEM_NONE && slot.count > 0 {
+                player.inventory.add(slot.item, slot.count);
+            }
+            runtime.touch(&key);
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+
+    for (interaction, button) in &mut deposit_buttons {
+        if *interaction != Interaction::Pressed || !is_essence_item(button.item) {
+            continue;
+        }
+        let amount = player.inventory.count(button.item);
+        if amount == 0 {
+            continue;
+        }
+        let result = with_crucible_mut(&mut runtime, object_id, |data| {
+            deposit_to_crucible_input(&mut data.crucibles, object_id, button.item, amount)
+        });
+        if let Some((key, snapshot, moved)) = result {
+            if moved > 0 {
+                let _ = player.inventory.try_remove(button.item, moved);
+                runtime.touch(&key);
+                queue_chunk_save(
+                    &key,
+                    &snapshot,
+                    &services,
+                    &session,
+                    &time,
+                    &mut runtime,
+                    &mut queue,
+                    &mut status,
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn inserter_button_system(
     ui_state: Res<UiState>,
     mut runtime: ResMut<WorldRuntime>,
@@ -1951,6 +2337,13 @@ pub(crate) fn inserter_button_system(
 
     for (interaction, button) in &mut slot_buttons {
         if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let slot = find_inserter(&runtime, object_id)
+            .and_then(|inserter| inserter.inv.slots.get(button.index))
+            .copied()
+            .unwrap_or_default();
+        if slot.is_empty() || !player.inventory.can_add(slot.item, slot.count) {
             continue;
         }
         let result = with_inserter_mut(&mut runtime, object_id, |data| {
@@ -2070,6 +2463,200 @@ pub(crate) fn furnace_smelting_system(
                 &mut queue,
                 &mut status,
             );
+        }
+    }
+}
+
+pub(crate) fn alembic_distillation_system(
+    time: Res<Time>,
+    mut runtime: ResMut<WorldRuntime>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+) {
+    let delta = time.delta_secs();
+    if delta <= 0.0 {
+        return;
+    }
+
+    let mut save_keys = Vec::new();
+
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        let mut distilled_in_chunk = false;
+
+        for alembic in &mut loaded.data.alembics {
+            let output_item = essence_output_for_input(alembic.state.input.item);
+            let can_distill = output_item.is_some()
+                && !alembic.state.input.is_empty()
+                && (alembic.state.output.is_empty()
+                    || alembic.state.output.item == output_item.unwrap());
+
+            if !can_distill {
+                if alembic.state.progress != 0 {
+                    alembic.state.progress = 0;
+                }
+                continue;
+            }
+
+            let output_item = output_item.unwrap();
+            let mut progress = alembic.state.progress as f32 + delta * ALEMBIC_PROGRESS_PER_SEC;
+
+            while progress >= ALEMBIC_PROGRESS_PER_ITEM as f32 {
+                if alembic.state.input.is_empty()
+                    || (!alembic.state.output.is_empty()
+                        && alembic.state.output.item != output_item)
+                {
+                    break;
+                }
+
+                alembic.state.input.count = alembic.state.input.count.saturating_sub(1);
+                if alembic.state.input.count == 0 {
+                    alembic.state.input.clear();
+                }
+                if alembic.state.output.is_empty() {
+                    alembic.state.output.item = output_item;
+                    alembic.state.output.count = 1;
+                } else {
+                    alembic.state.output.count = alembic.state.output.count.saturating_add(1);
+                }
+
+                distilled_in_chunk = true;
+                progress -= ALEMBIC_PROGRESS_PER_ITEM as f32;
+            }
+
+            let still_can_distill = !alembic.state.input.is_empty()
+                && (alembic.state.output.is_empty() || alembic.state.output.item == output_item);
+            alembic.state.progress = if still_can_distill {
+                progress.min(ALEMBIC_PROGRESS_PER_ITEM as f32) as u16
+            } else {
+                0
+            };
+        }
+
+        if distilled_in_chunk {
+            save_keys.push(key.clone());
+        }
+    }
+
+    for key in save_keys {
+        let snapshot = runtime.loaded.get(&key).map(|loaded| loaded.data.clone());
+        if let Some(snapshot) = snapshot {
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+}
+
+pub(crate) fn crucible_transmutation_system(
+    time: Res<Time>,
+    mut runtime: ResMut<WorldRuntime>,
+    services: NonSend<StorageServices>,
+    session: Res<WorldSession>,
+    mut queue: ResMut<SaveQueue>,
+    mut status: ResMut<StorageStatus>,
+) {
+    let delta = time.delta_secs();
+    if delta <= 0.0 {
+        return;
+    }
+
+    let mut save_keys = Vec::new();
+
+    for (key, loaded) in runtime.loaded.iter_mut() {
+        let mut changed_in_chunk = false;
+
+        for crucible in &mut loaded.data.crucibles {
+            if active_crucible_formula(&crucible.state).is_none() {
+                if crucible.state.progress != 0 {
+                    crucible.state.progress = 0;
+                }
+                continue;
+            }
+
+            let mut progress = crucible.state.progress as f32 + delta * CRUCIBLE_PROGRESS_PER_SEC;
+
+            while progress >= CRUCIBLE_PROGRESS_PER_ITEM as f32 {
+                let Some(formula) = active_crucible_formula(&crucible.state) else {
+                    break;
+                };
+                consume_crucible_inputs(&mut crucible.state.inputs, formula);
+                if crucible.state.output.is_empty() {
+                    crucible.state.output.item = formula.output;
+                    crucible.state.output.count = formula.output_amount;
+                } else {
+                    crucible.state.output.count = crucible
+                        .state
+                        .output
+                        .count
+                        .saturating_add(formula.output_amount);
+                }
+
+                changed_in_chunk = true;
+                progress -= CRUCIBLE_PROGRESS_PER_ITEM as f32;
+            }
+
+            crucible.state.progress = if active_crucible_formula(&crucible.state).is_some() {
+                progress.min(CRUCIBLE_PROGRESS_PER_ITEM as f32) as u16
+            } else {
+                0
+            };
+        }
+
+        if changed_in_chunk {
+            save_keys.push(key.clone());
+        }
+    }
+
+    for key in save_keys {
+        let snapshot = runtime.loaded.get(&key).map(|loaded| loaded.data.clone());
+        if let Some(snapshot) = snapshot {
+            queue_chunk_save(
+                &key,
+                &snapshot,
+                &services,
+                &session,
+                &time,
+                &mut runtime,
+                &mut queue,
+                &mut status,
+            );
+        }
+    }
+}
+
+fn active_crucible_formula(state: &CrucibleState) -> Option<&'static CrucibleFormula> {
+    let formula = crucible_formula_for_slots(&state.inputs)?;
+    if !state.output.is_empty() && state.output.item != formula.output {
+        return None;
+    }
+    Some(formula)
+}
+
+fn consume_crucible_inputs(
+    inputs: &mut [Slot; CRUCIBLE_INPUT_SLOT_COUNT],
+    formula: &CrucibleFormula,
+) {
+    for (item, amount) in formula.inputs {
+        let mut remaining = *amount;
+        for slot in inputs.iter_mut().filter(|slot| slot.item == *item) {
+            let consumed = slot.count.min(remaining);
+            slot.count -= consumed;
+            remaining -= consumed;
+            if slot.count == 0 {
+                slot.clear();
+            }
+            if remaining == 0 {
+                break;
+            }
         }
     }
 }

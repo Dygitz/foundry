@@ -7,6 +7,12 @@ use crate::{
 
 pub(crate) struct FoundryUiPlugin;
 
+const TIPS_SCROLL_VIEWPORT_HEIGHT: f32 = 320.0;
+const TIPS_SCROLLBAR_WIDTH: f32 = 8.0;
+const TIPS_SCROLLBAR_PADDING: f32 = 4.0;
+const TIPS_SCROLLBAR_INITIAL_THUMB_HEIGHT: f32 = 92.0;
+const TIPS_SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 48.0;
+
 impl Plugin for FoundryUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup)
@@ -29,7 +35,16 @@ impl Plugin for FoundryUiPlugin {
                     crafting_tab_button_system,
                     crafting_tab_visual_system,
                     inventory_cell_hover_system,
+                    inventory_scroll_system,
+                    tips_scrollbar_visual_system,
+                )
+                    .in_set(UpdateSet::Ui),
+            )
+            .add_systems(
+                Update,
+                (
                     crafting_recipe_button_system,
+                    inventory_stack_ui_system,
                     crafting_panel_text_system,
                     crafting_recipe_visual_system,
                     pickup_notice_spawn_system,
@@ -37,6 +52,8 @@ impl Plugin for FoundryUiPlugin {
                     chest_ui_system,
                     furnace_ui_system,
                     drill_ui_system,
+                    alembic_ui_system,
+                    crucible_ui_system,
                     inserter_ui_system,
                 )
                     .in_set(UpdateSet::Ui),
@@ -146,7 +163,7 @@ pub(crate) fn setup(
 pub(crate) fn spawn_pickup_feed(commands: &mut Commands) {
     commands.spawn((
         Node {
-            width: Val::Px(220.0),
+            width: Val::Px(260.0),
             position_type: PositionType::Absolute,
             left: Val::Px(12.0),
             top: Val::Px(76.0),
@@ -175,6 +192,16 @@ pub(crate) fn build_ui_icon_assets(
         chest: asset_server.load("sprites/items/chest.png"),
         inserter: asset_server.load("sprites/items/inserter.png"),
         mining_drill: asset_server.load("sprites/items/mining_drill.png"),
+        alembic: asset_server.load("sprites/items/alembic.png"),
+        crucible: asset_server.load("sprites/items/crucible.png"),
+        ferric_essence: asset_server.load("sprites/items/ferric_essence.png"),
+        cupric_essence: asset_server.load("sprites/items/cupric_essence.png"),
+        umbral_essence: asset_server.load("sprites/items/umbral_essence.png"),
+        mineral_essence: asset_server.load("sprites/items/mineral_essence.png"),
+        lodestone: asset_server.load("sprites/items/lodestone.png"),
+        brass_core: asset_server.load("sprites/items/brass_core.png"),
+        cinder_glass: asset_server.load("sprites/items/cinder_glass.png"),
+        quintessence: asset_server.load("sprites/items/quintessence.png"),
         crafting: asset_server.load("sprites/ui/crafting.png"),
         tips: asset_server.load("sprites/ui/tips.png"),
     }
@@ -186,6 +213,8 @@ pub(crate) fn build_placement_preview_assets(images: &mut Assets<Image>) -> Plac
         chest: images.add(build_placed_preview_image(PLACED_CHEST)),
         inserter: images.add(build_placed_preview_image(PLACED_INSERTER)),
         mining_drill: images.add(build_placed_preview_image(PLACED_MINING_DRILL)),
+        alembic: images.add(build_placed_preview_image(PLACED_ALEMBIC)),
+        crucible: images.add(build_placed_preview_image(PLACED_CRUCIBLE)),
     }
 }
 
@@ -832,17 +861,30 @@ pub(crate) fn spawn_crafting_content(
                         hud_text_shadow(),
                     ));
                     inventory
-                        .spawn(Node {
-                            display: Display::Flex,
-                            flex_wrap: FlexWrap::Wrap,
-                            column_gap: Val::Px(8.0),
-                            row_gap: Val::Px(8.0),
-                            ..default()
-                        })
-                        .with_children(|grid| {
-                            for item in INVENTORY_ITEMS {
-                                spawn_inventory_cell(grid, icons, item);
-                            }
+                        .spawn((
+                            Node {
+                                width: Val::Px(220.0),
+                                height: Val::Px(300.0),
+                                overflow: Overflow::scroll_y(),
+                                ..default()
+                            },
+                            ScrollPosition::default(),
+                            InventoryScrollArea,
+                        ))
+                        .with_children(|viewport| {
+                            viewport
+                                .spawn(Node {
+                                    display: Display::Flex,
+                                    flex_wrap: FlexWrap::Wrap,
+                                    column_gap: Val::Px(8.0),
+                                    row_gap: Val::Px(8.0),
+                                    ..default()
+                                })
+                                .with_children(|grid| {
+                                    for slot_index in 0..INVENTORY_SLOT_COUNT {
+                                        spawn_inventory_cell(grid, icons, slot_index);
+                                    }
+                                });
                         });
                 });
 
@@ -940,61 +982,121 @@ pub(crate) fn spawn_tips_content(
 
             tips.spawn(Node {
                 width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
+                height: Val::Px(TIPS_SCROLL_VIEWPORT_HEIGHT),
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(10.0),
                 ..default()
             })
-            .with_children(|list| {
-                spawn_tip_row(
-                    list,
-                    "Mine",
-                    "Left click resource tiles to mine ore, stone, coal, copper, and iron.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Build",
-                    "Craft a placeable, select it with 1-0, then left click a clear tile.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Quick Select",
-                    "F selects furnace, C chest, I inserter, and D mining drill.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Remove",
-                    "Hold right click on a placed structure to pick it back up.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Inserters",
-                    "Select an inserter and press R before placing to rotate its output.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Drills",
-                    "Mining drills must sit on resource tiles and need coal fuel.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Furnaces",
-                    "Put ore in Input and coal in Fuel; plates collect in Output.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Map",
-                    "Press M to open the map. Drag to pan; mouse wheel zooms.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Craft Faster",
-                    "Hold Shift while clicking a recipe to craft as many as possible.",
-                );
-                spawn_tip_row(
-                    list,
-                    "Cancel",
-                    "Esc or right click clears placement or closes the open panel.",
-                );
+            .with_children(|scroll_frame| {
+                scroll_frame
+                    .spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            height: Val::Percent(100.0),
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        ScrollPosition::default(),
+                        TipsScrollArea,
+                    ))
+                    .with_children(|viewport| {
+                        viewport
+                            .spawn(Node {
+                                width: Val::Percent(100.0),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(8.0),
+                                ..default()
+                            })
+                            .with_children(|list| {
+                                spawn_tip_row(
+                                    list,
+                                    "Mine",
+                                    "Left click resource tiles to gather ferric ore, cupric ore, black salt, and saltstone.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Build",
+                                    "Craft a placeable, select it with 1-0, then left click a clear tile.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Quick Select",
+                                    "F selects Athanor, C Reliquary, I Brass Arm, D Extractor, L Alembic, and X Crucible.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Remove",
+                                    "Hold right click on a placed structure to pick it back up.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Brass Arms",
+                                    "Select a Brass Arm and press R before placing to rotate its output.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Extractors",
+                                    "Extractors must sit on resource tiles and need black salt fuel.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Athanors",
+                                    "Put ore in Input and black salt in Fuel; calx collects in Output.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Map",
+                                    "Press M to open the map. Drag to pan; mouse wheel zooms.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Alembics",
+                                    "Feed reagents into an Alembic to distill ferric, cupric, umbral, and mineral essences.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Crucibles",
+                                    "Combine essences into Lodestone, Brass Core, Cinder Glass, or Quintessence.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Craft Faster",
+                                    "Hold Shift while clicking a recipe to craft as many as possible.",
+                                );
+                                spawn_tip_row(
+                                    list,
+                                    "Cancel",
+                                    "Esc or right click clears placement or closes the open panel.",
+                                );
+                            });
+                    });
+                scroll_frame
+                    .spawn((
+                        Node {
+                            width: Val::Px(TIPS_SCROLLBAR_WIDTH),
+                            height: Val::Percent(100.0),
+                            position_type: PositionType::Relative,
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.18)),
+                        BorderRadius::all(Val::Px(4.0)),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(1.0),
+                                top: Val::Px(TIPS_SCROLLBAR_PADDING),
+                                width: Val::Px(TIPS_SCROLLBAR_WIDTH - 2.0),
+                                height: Val::Px(TIPS_SCROLLBAR_INITIAL_THUMB_HEIGHT),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.92)),
+                            BorderRadius::all(Val::Px(3.0)),
+                            TipsScrollbarThumb,
+                        ));
+                    });
             });
         });
 }
@@ -1046,12 +1148,13 @@ pub(crate) fn spawn_tip_row(
 pub(crate) fn spawn_inventory_cell(
     parent: &mut ChildSpawnerCommands,
     icons: &UiIconAssets,
-    item: ItemId,
+    slot_index: usize,
 ) {
     parent
         .spawn((
             Button,
             Node {
+                display: Display::None,
                 width: Val::Px(64.0),
                 height: Val::Px(64.0),
                 align_items: AlignItems::Center,
@@ -1063,20 +1166,21 @@ pub(crate) fn spawn_inventory_cell(
             BackgroundColor(Color::srgba(0.08, 0.11, 0.09, 0.72)),
             BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.1)),
             BorderRadius::all(Val::Px(5.0)),
-            InventoryCellButton { item },
+            InventoryCellButton { slot_index },
         ))
         .with_children(|cell| {
             cell.spawn((
-                ImageNode::new(icons.for_item(item)),
+                ImageNode::new(icons.empty.clone()),
                 Node {
                     width: Val::Px(30.0),
                     height: Val::Px(30.0),
                     flex_shrink: 0.0,
                     ..default()
                 },
+                InventoryCellIcon { slot_index },
             ));
             cell.spawn((
-                Text::new("0"),
+                Text::new(""),
                 TextFont {
                     font_size: 13.0,
                     ..default()
@@ -1089,7 +1193,7 @@ pub(crate) fn spawn_inventory_cell(
                     bottom: Val::Px(3.0),
                     ..default()
                 },
-                InventoryItemCountText { item },
+                InventoryItemCountText { slot_index },
             ));
         });
 }
@@ -1150,7 +1254,7 @@ pub(crate) fn spawn_chest_panel(parent: &mut ChildSpawnerCommands, icons: &UiIco
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new("Chest"),
+                Text::new("Reliquary"),
                 TextFont {
                     font_size: 22.0,
                     ..default()
@@ -1339,7 +1443,7 @@ pub(crate) fn spawn_furnace_panel(parent: &mut ChildSpawnerCommands, icons: &UiI
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new("Furnace"),
+                Text::new("Athanor"),
                 TextFont {
                     font_size: 22.0,
                     ..default()
@@ -1562,7 +1666,7 @@ pub(crate) fn spawn_drill_panel(parent: &mut ChildSpawnerCommands, icons: &UiIco
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new("Mining Drill"),
+                Text::new("Extractor"),
                 TextFont {
                     font_size: 22.0,
                     ..default()
@@ -1751,6 +1855,443 @@ pub(crate) fn spawn_drill_deposit_cell(
         });
 }
 
+pub(crate) fn spawn_alembic_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(430.0),
+                max_width: Val::Percent(92.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            AlembicPanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Alembic"),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
+            ));
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    column_gap: Val::Px(18.0),
+                    ..default()
+                })
+                .with_children(|slots| {
+                    spawn_alembic_slot_cell(slots, icons, AlembicSlot::Input, "Reagent");
+                    spawn_alembic_slot_cell(slots, icons, AlembicSlot::Output, "Essence");
+                });
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(ALEMBIC_PROGRESS_BAR_WIDTH),
+                        height: Val::Px(10.0),
+                        align_self: AlignSelf::Center,
+                        overflow: Overflow::clip(),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.035, 0.78)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Px(0.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.37, 0.85, 0.72)),
+                        AlembicProgressBar,
+                    ));
+                });
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|section| {
+                    spawn_panel_section_label(section, "Reagents");
+                    section
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_alembic_deposit_cell(row, icons, ITEM_IRON_ORE);
+                            spawn_alembic_deposit_cell(row, icons, ITEM_COPPER_ORE);
+                            spawn_alembic_deposit_cell(row, icons, ITEM_COAL);
+                            spawn_alembic_deposit_cell(row, icons, ITEM_STONE);
+                        });
+                });
+        });
+}
+
+pub(crate) fn spawn_alembic_slot_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    slot: AlembicSlot,
+    label: &'static str,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Px(68.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|stack| {
+            stack.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.84, 0.8)),
+                hud_text_shadow(),
+            ));
+            stack
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(58.0),
+                        height: Val::Px(58.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        position_type: PositionType::Relative,
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    storage_cell_background(false, false),
+                    storage_cell_border(false),
+                    BorderRadius::all(Val::Px(5.0)),
+                    AlembicSlotButton { slot },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        ImageNode::new(icons.empty.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        AlembicSlotIcon { slot },
+                    ));
+                    button.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(5.0),
+                            bottom: Val::Px(3.0),
+                            ..default()
+                        },
+                        AlembicSlotCountText { slot },
+                    ));
+                });
+        });
+}
+
+pub(crate) fn spawn_alembic_deposit_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    item: ItemId,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            AlembicDepositButton { item },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                AlembicDepositIcon { item },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                AlembicDepositCountText { item },
+            ));
+        });
+}
+
+pub(crate) fn spawn_crucible_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(520.0),
+                max_width: Val::Percent(94.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                row_gap: Val::Px(14.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(hud_panel_color()),
+            BorderColor(hud_border_color()),
+            BorderRadius::all(Val::Px(8.0)),
+            hud_shadow(),
+            CruciblePanel,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Crucible"),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                hud_text_shadow(),
+            ));
+            panel.spawn((
+                Text::new("Formula: Waiting"),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.94, 0.9, 0.74, 0.92)),
+                hud_text_shadow(),
+                CrucibleFormulaText,
+            ));
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    column_gap: Val::Px(12.0),
+                    ..default()
+                })
+                .with_children(|slots| {
+                    spawn_crucible_slot_cell(slots, icons, CrucibleSlot::Input(0), "I");
+                    spawn_crucible_slot_cell(slots, icons, CrucibleSlot::Input(1), "II");
+                    spawn_crucible_slot_cell(slots, icons, CrucibleSlot::Input(2), "III");
+                    spawn_crucible_slot_cell(slots, icons, CrucibleSlot::Input(3), "IV");
+                    spawn_crucible_slot_cell(slots, icons, CrucibleSlot::Output, "Result");
+                });
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(CRUCIBLE_PROGRESS_BAR_WIDTH),
+                        height: Val::Px(10.0),
+                        align_self: AlignSelf::Center,
+                        overflow: Overflow::clip(),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.035, 0.78)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    BorderRadius::all(Val::Px(3.0)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        Node {
+                            width: Val::Px(0.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.86, 0.58, 0.22)),
+                        CrucibleProgressBar,
+                    ));
+                });
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|section| {
+                    spawn_panel_section_label(section, "Essences");
+                    section
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_crucible_deposit_cell(row, icons, ITEM_FERRIC_ESSENCE);
+                            spawn_crucible_deposit_cell(row, icons, ITEM_CUPRIC_ESSENCE);
+                            spawn_crucible_deposit_cell(row, icons, ITEM_UMBRAL_ESSENCE);
+                            spawn_crucible_deposit_cell(row, icons, ITEM_MINERAL_ESSENCE);
+                        });
+                });
+        });
+}
+
+pub(crate) fn spawn_crucible_slot_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    slot: CrucibleSlot,
+    label: &'static str,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Px(68.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|stack| {
+            stack.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.84, 0.8)),
+                hud_text_shadow(),
+            ));
+            stack
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(58.0),
+                        height: Val::Px(58.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        position_type: PositionType::Relative,
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    storage_cell_background(false, false),
+                    storage_cell_border(false),
+                    BorderRadius::all(Val::Px(5.0)),
+                    CrucibleSlotButton { slot },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        ImageNode::new(icons.empty.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        CrucibleSlotIcon { slot },
+                    ));
+                    button.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 13.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                        hud_text_shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: Val::Px(5.0),
+                            bottom: Val::Px(3.0),
+                            ..default()
+                        },
+                        CrucibleSlotCountText { slot },
+                    ));
+                });
+        });
+}
+
+pub(crate) fn spawn_crucible_deposit_cell(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    item: ItemId,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(58.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Relative,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            storage_cell_background(false, false),
+            storage_cell_border(false),
+            BorderRadius::all(Val::Px(5.0)),
+            CrucibleDepositButton { item },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icons.for_item(item)),
+                Node {
+                    width: Val::Px(30.0),
+                    height: Val::Px(30.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                CrucibleDepositIcon { item },
+            ));
+            button.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.94, 0.94, 0.91)),
+                hud_text_shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(5.0),
+                    bottom: Val::Px(3.0),
+                    ..default()
+                },
+                CrucibleDepositCountText { item },
+            ));
+        });
+}
+
 pub(crate) fn spawn_inserter_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
     parent
         .spawn((
@@ -1771,7 +2312,7 @@ pub(crate) fn spawn_inserter_panel(parent: &mut ChildSpawnerCommands, icons: &Ui
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new("Inserter"),
+                Text::new("Brass Arm"),
                 TextFont {
                     font_size: 22.0,
                     ..default()
@@ -1920,6 +2461,25 @@ pub(crate) fn drill_slot(drill: Option<&DrillRecord>, slot: DrillSlot) -> Option
     })
 }
 
+pub(crate) fn alembic_slot(alembic: Option<&AlembicRecord>, slot: AlembicSlot) -> Option<Slot> {
+    alembic.map(|alembic| match slot {
+        AlembicSlot::Input => alembic.state.input,
+        AlembicSlot::Output => alembic.state.output,
+    })
+}
+
+pub(crate) fn crucible_slot(crucible: Option<&CrucibleRecord>, slot: CrucibleSlot) -> Option<Slot> {
+    crucible.map(|crucible| match slot {
+        CrucibleSlot::Input(index) => crucible
+            .state
+            .inputs
+            .get(index)
+            .copied()
+            .unwrap_or_default(),
+        CrucibleSlot::Output => crucible.state.output,
+    })
+}
+
 pub(crate) fn craft_menu_toggle_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<UiState>,
@@ -2015,6 +2575,18 @@ pub(crate) fn ui_visibility_system(
             commands
                 .entity(panel_entity)
                 .with_children(|parent| spawn_drill_panel(parent, &icons));
+        }
+        UiMode::Alembic { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_alembic_panel(parent, &icons));
+        }
+        UiMode::Crucible { .. } => {
+            *overlay_visibility = Visibility::Visible;
+            commands
+                .entity(panel_entity)
+                .with_children(|parent| spawn_crucible_panel(parent, &icons));
         }
     }
 }
@@ -2188,7 +2760,7 @@ pub(crate) fn mining_feedback_ui_system(
         let max_amount = mining_feedback.tracked_max_amount.max(1);
         ratio = (resource.amount as f32 / max_amount as f32).clamp(0.0, 1.0);
         let resource_name = resource_display_name(resource.kind);
-        instruction = format!("Mining {resource_name}");
+        instruction = format!("Extracting {resource_name}");
         details = format!("{resource_name} left: {}/{}", resource.amount, max_amount);
     } else {
         for mut visibility in &mut panel_query {
@@ -2269,7 +2841,7 @@ pub(crate) fn placement_direction_ui_system(
 
     let label = inserter_direction_label(placement.inserter_direction);
     for mut text in &mut text_query {
-        *text = Text::new(format!("Inserter output: {label}"));
+        *text = Text::new(format!("Brass Arm output: {label}"));
     }
 }
 
@@ -2307,18 +2879,24 @@ pub(crate) fn crafting_tab_visual_system(
 }
 
 pub(crate) fn inventory_cell_hover_system(
+    player: Res<PlayerState>,
     mut crafting_ui: ResMut<CraftingUiState>,
     mut query: Query<(&Interaction, &InventoryCellButton), Changed<Interaction>>,
 ) {
+    let stacks = player.inventory.stacks();
     for (interaction, cell) in &mut query {
-        match *interaction {
-            Interaction::Hovered | Interaction::Pressed => {
-                crafting_ui.hovered_item = Some(cell.item);
+        let item = stacks.get(cell.slot_index).map(|stack| stack.item);
+        match (*interaction, item) {
+            (Interaction::Hovered | Interaction::Pressed, Some(item)) => {
+                crafting_ui.hovered_item = Some(item);
             }
-            Interaction::None if crafting_ui.hovered_item == Some(cell.item) => {
+            (Interaction::None, Some(item)) if crafting_ui.hovered_item == Some(item) => {
                 crafting_ui.hovered_item = None;
             }
-            Interaction::None => {}
+            (Interaction::None, None) => {
+                crafting_ui.hovered_item = None;
+            }
+            _ => {}
         }
     }
 }
@@ -2365,18 +2943,141 @@ pub(crate) fn crafting_recipe_button_system(
     }
 }
 
+pub(crate) fn inventory_scroll_system(
+    ui_state: Res<UiState>,
+    crafting_ui: Res<CraftingUiState>,
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut scroll_queries: ParamSet<(
+        Query<&mut ScrollPosition, With<InventoryScrollArea>>,
+        Query<(&mut ScrollPosition, &ComputedNode), With<TipsScrollArea>>,
+    )>,
+) {
+    if ui_state.mode != UiMode::Crafting {
+        return;
+    }
+    let target_tab = crafting_ui.active_tab;
+
+    for event in mouse_wheel_events.read() {
+        let delta = match event.unit {
+            MouseScrollUnit::Line => event.y * 48.0,
+            MouseScrollUnit::Pixel => event.y,
+        };
+        match target_tab {
+            CraftingTab::Crafting => {
+                for mut scroll in &mut scroll_queries.p0() {
+                    scroll.offset_y = (scroll.offset_y - delta).max(0.0);
+                }
+            }
+            CraftingTab::Tips => {
+                for (mut scroll, computed) in &mut scroll_queries.p1() {
+                    let max_offset = tips_max_scroll_offset(computed);
+                    scroll.offset_y = (scroll.offset_y - delta).clamp(0.0, max_offset);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn tips_scrollbar_visual_system(
+    ui_state: Res<UiState>,
+    crafting_ui: Res<CraftingUiState>,
+    scroll_query: Query<(&ScrollPosition, &ComputedNode), With<TipsScrollArea>>,
+    mut thumb_query: Query<&mut Node, With<TipsScrollbarThumb>>,
+) {
+    if ui_state.mode != UiMode::Crafting || crafting_ui.active_tab != CraftingTab::Tips {
+        return;
+    }
+
+    let Some((scroll, computed)) = scroll_query.iter().next() else {
+        return;
+    };
+    let (thumb_height, thumb_top) = tips_scrollbar_thumb_metrics(scroll.offset_y, computed);
+    for mut thumb in &mut thumb_query {
+        thumb.height = Val::Px(thumb_height);
+        thumb.top = Val::Px(thumb_top);
+    }
+}
+
+pub(crate) fn tips_max_scroll_offset(computed: &ComputedNode) -> f32 {
+    ((computed.content_size().y - computed.size().y).max(0.0) * computed.inverse_scale_factor)
+        .max(0.0)
+}
+
+pub(crate) fn tips_scrollbar_thumb_metrics(
+    scroll_offset: f32,
+    computed: &ComputedNode,
+) -> (f32, f32) {
+    let viewport_height = (computed.size().y * computed.inverse_scale_factor).max(1.0);
+    let content_height =
+        (computed.content_size().y * computed.inverse_scale_factor).max(viewport_height);
+    let track_height = (viewport_height - TIPS_SCROLLBAR_PADDING * 2.0).max(1.0);
+    let thumb_height = if content_height <= viewport_height {
+        track_height
+    } else {
+        (track_height * (viewport_height / content_height))
+            .clamp(TIPS_SCROLLBAR_MIN_THUMB_HEIGHT, track_height)
+    };
+    let max_offset = (content_height - viewport_height).max(0.0);
+    let travel = (track_height - thumb_height).max(0.0);
+    let thumb_top = TIPS_SCROLLBAR_PADDING
+        + if max_offset > 0.0 {
+            (scroll_offset / max_offset).clamp(0.0, 1.0) * travel
+        } else {
+            0.0
+        };
+    (thumb_height, thumb_top)
+}
+
+pub(crate) fn inventory_stack_ui_system(
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut cell_query: Query<(
+        &InventoryCellButton,
+        &Interaction,
+        &mut Node,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut icon_query: Query<(&InventoryCellIcon, &mut ImageNode)>,
+    mut count_query: Query<(&InventoryItemCountText, &mut Text)>,
+) {
+    let stacks = player.inventory.stacks();
+
+    for (cell, interaction, mut node, mut background, mut border) in &mut cell_query {
+        let Some(_stack) = stacks.get(cell.slot_index) else {
+            node.display = Display::None;
+            continue;
+        };
+        node.display = Display::Flex;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(true, hovered);
+        *border = storage_cell_border(true);
+    }
+
+    for (icon, mut image) in &mut icon_query {
+        if let Some(stack) = stacks.get(icon.slot_index) {
+            image.image = icons.for_item(stack.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (count, mut text) in &mut count_query {
+        let label = stacks
+            .get(count.slot_index)
+            .map(|stack| stack.count.to_string())
+            .unwrap_or_default();
+        *text = Text::new(label);
+    }
+}
+
 pub(crate) fn crafting_panel_text_system(
     player: Res<PlayerState>,
     crafting_ui: Res<CraftingUiState>,
-    mut text_queries: ParamSet<(
-        Query<(&InventoryItemCountText, &mut Text)>,
-        Query<&mut Text, With<RecipeDetailText>>,
-    )>,
+    mut text_query: Query<&mut Text, With<RecipeDetailText>>,
 ) {
-    for (count, mut text) in &mut text_queries.p0() {
-        *text = Text::new(player.inventory.count(count.item).to_string());
-    }
-
     let label = if let Some(item) = crafting_ui.hovered_item {
         item_detail_label(item, &player.inventory)
     } else {
@@ -2384,7 +3085,7 @@ pub(crate) fn crafting_panel_text_system(
             .map(|recipe| recipe_detail_label(recipe, &player.inventory))
             .unwrap_or_default()
     };
-    for mut text in &mut text_queries.p1() {
+    for mut text in &mut text_query {
         *text = Text::new(label.clone());
     }
 }
@@ -2461,12 +3162,13 @@ pub(crate) fn pickup_notice_spawn_system(
             parent
                 .spawn((
                     Node {
-                        width: Val::Px(210.0),
-                        height: Val::Px(34.0),
+                        width: Val::Px(250.0),
+                        min_height: Val::Px(44.0),
                         align_items: AlignItems::Center,
-                        padding: UiRect::horizontal(Val::Px(8.0)),
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
                         column_gap: Val::Px(8.0),
                         border: UiRect::all(Val::Px(1.0)),
+                        overflow: Overflow::clip(),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.06, 0.055, 0.045, 0.82)),
@@ -2491,11 +3193,19 @@ pub(crate) fn pickup_notice_spawn_system(
                     toast.spawn((
                         Text::new(label),
                         TextFont {
-                            font_size: 15.0,
+                            font_size: 14.0,
+                            line_height: LineHeight::Px(15.0),
                             ..default()
                         },
+                        TextLayout::new(JustifyText::Left, LineBreak::WordOrCharacter),
                         TextColor(Color::srgb(0.96, 0.96, 0.94)),
                         hud_text_shadow(),
+                        Node {
+                            flex_grow: 1.0,
+                            flex_shrink: 1.0,
+                            min_width: Val::Px(0.0),
+                            ..default()
+                        },
                         PickupNoticeText,
                     ));
                 });
@@ -2790,6 +3500,201 @@ pub(crate) fn drill_ui_system(
         .unwrap_or(0.0);
     for mut node in &mut bar_query {
         node.width = Val::Px(width);
+    }
+}
+
+pub(crate) fn alembic_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<
+        (
+            &AlembicSlotButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<AlembicDepositButton>,
+    >,
+    mut slot_icons: Query<(&AlembicSlotIcon, &mut ImageNode), Without<AlembicDepositIcon>>,
+    mut slot_counts: Query<(&AlembicSlotCountText, &mut Text), Without<AlembicDepositCountText>>,
+    mut deposit_buttons: Query<
+        (
+            &AlembicDepositButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<AlembicSlotButton>,
+    >,
+    mut deposit_icons: Query<(&AlembicDepositIcon, &mut ImageNode), Without<AlembicSlotIcon>>,
+    mut deposit_counts: Query<(&AlembicDepositCountText, &mut Text), Without<AlembicSlotCountText>>,
+    mut bar_query: Query<&mut Node, With<AlembicProgressBar>>,
+) {
+    let UiMode::Alembic { object_id } = ui_state.mode else {
+        return;
+    };
+    let alembic = find_alembic(&runtime, object_id);
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = alembic_slot(alembic, button.slot);
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        if let Some(slot) = alembic_slot(alembic, slot_icon.slot).filter(|slot| !slot.is_empty()) {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut slot_counts {
+        let count = alembic_slot(alembic, slot_count.slot)
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut deposit_buttons {
+        let count = player.inventory.count(button.item);
+        let occupied = count > 0;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (deposit_icon, mut image) in &mut deposit_icons {
+        image.color = if player.inventory.count(deposit_icon.item) > 0 {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.32)
+        };
+    }
+
+    for (deposit_count, mut text) in &mut deposit_counts {
+        *text = Text::new(item_count_label(player.inventory.count(deposit_count.item)));
+    }
+
+    let width = alembic
+        .map(|alembic| {
+            ALEMBIC_PROGRESS_BAR_WIDTH
+                * (alembic.state.progress as f32 / ALEMBIC_PROGRESS_PER_ITEM as f32).clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.0);
+    for mut node in &mut bar_query {
+        node.width = Val::Px(width);
+    }
+}
+
+pub(crate) fn crucible_ui_system(
+    ui_state: Res<UiState>,
+    runtime: Res<WorldRuntime>,
+    player: Res<PlayerState>,
+    icons: Res<UiIconAssets>,
+    mut slot_buttons: Query<
+        (
+            &CrucibleSlotButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<CrucibleDepositButton>,
+    >,
+    mut slot_icons: Query<(&CrucibleSlotIcon, &mut ImageNode), Without<CrucibleDepositIcon>>,
+    mut text_queries: ParamSet<(
+        Query<(&CrucibleSlotCountText, &mut Text), Without<CrucibleDepositCountText>>,
+        Query<(&CrucibleDepositCountText, &mut Text), Without<CrucibleSlotCountText>>,
+        Query<&mut Text, With<CrucibleFormulaText>>,
+    )>,
+    mut deposit_buttons: Query<
+        (
+            &CrucibleDepositButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        Without<CrucibleSlotButton>,
+    >,
+    mut deposit_icons: Query<(&CrucibleDepositIcon, &mut ImageNode), Without<CrucibleSlotIcon>>,
+    mut bar_query: Query<&mut Node, With<CrucibleProgressBar>>,
+) {
+    let UiMode::Crucible { object_id } = ui_state.mode else {
+        return;
+    };
+    let crucible = find_crucible(&runtime, object_id);
+
+    for (button, interaction, mut background, mut border) in &mut slot_buttons {
+        let slot = crucible_slot(crucible, button.slot);
+        let occupied = matches!(slot, Some(slot) if !slot.is_empty());
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (slot_icon, mut image) in &mut slot_icons {
+        if let Some(slot) = crucible_slot(crucible, slot_icon.slot).filter(|slot| !slot.is_empty())
+        {
+            image.image = icons.for_item(slot.item);
+            image.color = Color::WHITE;
+        } else {
+            image.image = icons.empty.clone();
+            image.color = Color::srgba(1.0, 1.0, 1.0, 0.0);
+        }
+    }
+
+    for (slot_count, mut text) in &mut text_queries.p0() {
+        let count = crucible_slot(crucible, slot_count.slot)
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.count)
+            .unwrap_or(0);
+        *text = Text::new(item_count_label(count));
+    }
+
+    for (button, interaction, mut background, mut border) in &mut deposit_buttons {
+        let count = player.inventory.count(button.item);
+        let occupied = count > 0;
+        let hovered = *interaction == Interaction::Hovered || *interaction == Interaction::Pressed;
+        *background = storage_cell_background(occupied, hovered);
+        *border = storage_cell_border(occupied);
+    }
+
+    for (deposit_icon, mut image) in &mut deposit_icons {
+        image.color = if player.inventory.count(deposit_icon.item) > 0 {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.32)
+        };
+    }
+
+    for (deposit_count, mut text) in &mut text_queries.p1() {
+        *text = Text::new(item_count_label(player.inventory.count(deposit_count.item)));
+    }
+
+    let width = crucible
+        .map(|crucible| {
+            CRUCIBLE_PROGRESS_BAR_WIDTH
+                * (crucible.state.progress as f32 / CRUCIBLE_PROGRESS_PER_ITEM as f32)
+                    .clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.0);
+    for mut node in &mut bar_query {
+        node.width = Val::Px(width);
+    }
+
+    let formula_label = crucible
+        .and_then(|crucible| crucible_formula_for_slots(&crucible.state.inputs))
+        .map(|formula| format!("Formula: {}", item_name(formula.output)))
+        .unwrap_or_else(|| "Formula: Waiting".to_string());
+    for mut text in &mut text_queries.p2() {
+        *text = Text::new(formula_label.clone());
     }
 }
 
