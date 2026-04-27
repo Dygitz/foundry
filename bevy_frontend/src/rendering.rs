@@ -866,6 +866,34 @@ pub(crate) fn apply_placed_sprite(
     )
 }
 
+pub(crate) fn build_placed_preview_image(kind: PlacedId) -> Image {
+    let size = TERRAIN_TILE_PIXELS;
+    let mut pixels = vec![0u8; size * size * 4];
+
+    if let Some(rows) = placed_sprite_rows(kind) {
+        for (y, row) in rows.iter().enumerate() {
+            for (x, key) in row.as_bytes().iter().copied().enumerate().take(size) {
+                let index = (y * size + x) * 4;
+                pixels[index..index + 4].copy_from_slice(&placed_sprite_palette(kind, key));
+            }
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: size as u32,
+            height: size as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
 fn placed_sprite_rows(kind: PlacedId) -> Option<&'static [&'static str; TERRAIN_TILE_PIXELS]> {
     match kind {
         PLACED_FURNACE => Some(&FURNACE_WORLD_SPRITE),

@@ -36,6 +36,16 @@ pub(crate) struct RecipeButton {
 pub(crate) struct RecipeDetailText;
 
 #[derive(Component)]
+pub(crate) struct CraftingTabButton {
+    pub(crate) tab: CraftingTab,
+}
+
+#[derive(Component)]
+pub(crate) struct CraftingTabContent {
+    pub(crate) tab: CraftingTab,
+}
+
+#[derive(Component)]
 pub(crate) struct HotbarSlotButton {
     pub(crate) index: usize,
 }
@@ -253,6 +263,9 @@ pub(crate) struct PlacementDirectionPanel;
 
 #[derive(Component)]
 pub(crate) struct PlacementDirectionText;
+
+#[derive(Component)]
+pub(crate) struct PlacementPreview;
 
 #[derive(Component)]
 pub(crate) struct Player;

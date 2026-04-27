@@ -442,10 +442,27 @@ impl HotbarState {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum CraftingTab {
+    Crafting,
+    Tips,
+}
+
+#[derive(Resource)]
 pub(crate) struct CraftingUiState {
+    pub(crate) active_tab: CraftingTab,
     pub(crate) focused_recipe: usize,
     pub(crate) hovered_item: Option<ItemId>,
+}
+
+impl Default for CraftingUiState {
+    fn default() -> Self {
+        Self {
+            active_tab: CraftingTab::Crafting,
+            focused_recipe: 0,
+            hovered_item: None,
+        }
+    }
 }
 
 #[derive(Resource, Clone)]
@@ -463,6 +480,7 @@ pub(crate) struct UiIconAssets {
     pub(crate) inserter: Handle<Image>,
     pub(crate) mining_drill: Handle<Image>,
     pub(crate) crafting: Handle<Image>,
+    pub(crate) tips: Handle<Image>,
 }
 
 impl UiIconAssets {
@@ -479,6 +497,26 @@ impl UiIconAssets {
             ITEM_INSERTER => self.inserter.clone(),
             ITEM_MINING_DRILL => self.mining_drill.clone(),
             _ => self.empty.clone(),
+        }
+    }
+}
+
+#[derive(Resource, Clone)]
+pub(crate) struct PlacementPreviewAssets {
+    pub(crate) furnace: Handle<Image>,
+    pub(crate) chest: Handle<Image>,
+    pub(crate) inserter: Handle<Image>,
+    pub(crate) mining_drill: Handle<Image>,
+}
+
+impl PlacementPreviewAssets {
+    pub(crate) fn for_item(&self, item: ItemId) -> Option<Handle<Image>> {
+        match item {
+            ITEM_FURNACE => Some(self.furnace.clone()),
+            ITEM_CHEST => Some(self.chest.clone()),
+            ITEM_INSERTER => Some(self.inserter.clone()),
+            ITEM_MINING_DRILL => Some(self.mining_drill.clone()),
+            _ => None,
         }
     }
 }

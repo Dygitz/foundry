@@ -26,6 +26,8 @@ impl Plugin for FoundryUiPlugin {
                     mining_feedback_ui_system,
                     structure_pickup_feedback_ui_system,
                     placement_direction_ui_system,
+                    crafting_tab_button_system,
+                    crafting_tab_visual_system,
                     inventory_cell_hover_system,
                     crafting_recipe_button_system,
                     crafting_panel_text_system,
@@ -73,7 +75,9 @@ pub(crate) fn setup(
         Player,
     ));
     let icons = build_ui_icon_assets(&asset_server, &mut images);
+    let placement_previews = build_placement_preview_assets(&mut images);
     commands.insert_resource(icons.clone());
+    commands.insert_resource(placement_previews);
     spawn_game_hud(&mut commands, &icons);
     spawn_pickup_feed(&mut commands);
     commands
@@ -172,6 +176,16 @@ pub(crate) fn build_ui_icon_assets(
         inserter: asset_server.load("sprites/items/inserter.png"),
         mining_drill: asset_server.load("sprites/items/mining_drill.png"),
         crafting: asset_server.load("sprites/ui/crafting.png"),
+        tips: asset_server.load("sprites/ui/tips.png"),
+    }
+}
+
+pub(crate) fn build_placement_preview_assets(images: &mut Assets<Image>) -> PlacementPreviewAssets {
+    PlacementPreviewAssets {
+        furnace: images.add(build_placed_preview_image(PLACED_FURNACE)),
+        chest: images.add(build_placed_preview_image(PLACED_CHEST)),
+        inserter: images.add(build_placed_preview_image(PLACED_INSERTER)),
+        mining_drill: images.add(build_placed_preview_image(PLACED_MINING_DRILL)),
     }
 }
 
@@ -652,18 +666,22 @@ pub(crate) fn spawn_map_panel(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-pub(crate) fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands, icons: &UiIconAssets) {
+pub(crate) fn spawn_crafting_panel(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    active_tab: CraftingTab,
+) {
     parent
         .spawn((
             Node {
                 width: Val::Px(760.0),
                 max_width: Val::Percent(92.0),
                 min_height: Val::Px(420.0),
-                flex_direction: FlexDirection::Row,
+                flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::FlexStart,
                 align_items: AlignItems::Stretch,
                 padding: UiRect::all(Val::Px(16.0)),
-                column_gap: Val::Px(16.0),
+                row_gap: Val::Px(14.0),
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
@@ -674,6 +692,129 @@ pub(crate) fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands, icons: &Ui
         ))
         .with_children(|panel| {
             panel
+                .spawn(Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(42.0),
+                    column_gap: Val::Px(8.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|tabs| {
+                    spawn_crafting_tab_button(
+                        tabs,
+                        icons.crafting.clone(),
+                        "Crafting",
+                        CraftingTab::Crafting,
+                        active_tab,
+                    );
+                    spawn_crafting_tab_button(
+                        tabs,
+                        icons.tips.clone(),
+                        "Tips",
+                        CraftingTab::Tips,
+                        active_tab,
+                    );
+                });
+
+            spawn_crafting_content(panel, icons, active_tab);
+            spawn_tips_content(panel, icons, active_tab);
+        });
+}
+
+pub(crate) fn spawn_crafting_tab_button(
+    parent: &mut ChildSpawnerCommands,
+    icon: Handle<Image>,
+    label: &'static str,
+    tab: CraftingTab,
+    active_tab: CraftingTab,
+) {
+    let active = tab == active_tab;
+    parent
+        .spawn((
+            Button,
+            Node {
+                height: Val::Px(38.0),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(0.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(8.0),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(crafting_tab_background(active, Interaction::None)),
+            BorderColor(crafting_tab_border(active)),
+            BorderRadius::all(Val::Px(6.0)),
+            CraftingTabButton { tab },
+        ))
+        .with_children(|button| {
+            button.spawn((
+                ImageNode::new(icon),
+                Node {
+                    width: Val::Px(24.0),
+                    height: Val::Px(24.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
+            button.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.95, 0.92)),
+                hud_text_shadow(),
+            ));
+        });
+}
+
+pub(crate) fn crafting_tab_background(active: bool, interaction: Interaction) -> Color {
+    match (active, interaction) {
+        (true, _) => Color::srgba(0.15, 0.2, 0.13, 0.88),
+        (false, Interaction::Hovered) => Color::srgba(0.12, 0.15, 0.11, 0.82),
+        _ => Color::srgba(0.08, 0.1, 0.08, 0.72),
+    }
+}
+
+pub(crate) fn crafting_tab_border(active: bool) -> Color {
+    if active {
+        Color::srgb(0.96, 0.9, 0.65)
+    } else {
+        Color::srgba(1.0, 1.0, 1.0, 0.14)
+    }
+}
+
+pub(crate) fn crafting_tab_display(tab: CraftingTab, active_tab: CraftingTab) -> Display {
+    if tab == active_tab {
+        Display::Flex
+    } else {
+        Display::None
+    }
+}
+
+pub(crate) fn spawn_crafting_content(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    active_tab: CraftingTab,
+) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_grow: 1.0,
+                display: crafting_tab_display(CraftingTab::Crafting, active_tab),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::FlexStart,
+                align_items: AlignItems::Stretch,
+                column_gap: Val::Px(16.0),
+                ..default()
+            },
+            CraftingTabContent {
+                tab: CraftingTab::Crafting,
+            },
+        ))
+        .with_children(|content| {
+            content
                 .spawn(Node {
                     width: Val::Px(280.0),
                     flex_direction: FlexDirection::Column,
@@ -705,7 +846,7 @@ pub(crate) fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands, icons: &Ui
                         });
                 });
 
-            panel
+            content
                 .spawn(Node {
                     flex_grow: 1.0,
                     flex_direction: FlexDirection::Column,
@@ -747,6 +888,158 @@ pub(crate) fn spawn_crafting_panel(parent: &mut ChildSpawnerCommands, icons: &Ui
                         RecipeDetailText,
                     ));
                 });
+        });
+}
+
+pub(crate) fn spawn_tips_content(
+    parent: &mut ChildSpawnerCommands,
+    icons: &UiIconAssets,
+    active_tab: CraftingTab,
+) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_grow: 1.0,
+                display: crafting_tab_display(CraftingTab::Tips, active_tab),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(12.0),
+                ..default()
+            },
+            CraftingTabContent {
+                tab: CraftingTab::Tips,
+            },
+        ))
+        .with_children(|tips| {
+            tips.spawn((Node {
+                width: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                ..default()
+            },))
+                .with_children(|header| {
+                    header.spawn((
+                        ImageNode::new(icons.tips.clone()),
+                        Node {
+                            width: Val::Px(30.0),
+                            height: Val::Px(30.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ));
+                    header.spawn((
+                        Text::new("Tips and Tricks"),
+                        TextFont {
+                            font_size: 22.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.95, 0.93)),
+                        hud_text_shadow(),
+                    ));
+                });
+
+            tips.spawn(Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                ..default()
+            })
+            .with_children(|list| {
+                spawn_tip_row(
+                    list,
+                    "Mine",
+                    "Left click resource tiles to mine ore, stone, coal, copper, and iron.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Build",
+                    "Craft a placeable, select it with 1-0, then left click a clear tile.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Quick Select",
+                    "F selects furnace, C chest, I inserter, and D mining drill.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Remove",
+                    "Hold right click on a placed structure to pick it back up.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Inserters",
+                    "Select an inserter and press R before placing to rotate its output.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Drills",
+                    "Mining drills must sit on resource tiles and need coal fuel.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Furnaces",
+                    "Put ore in Input and coal in Fuel; plates collect in Output.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Map",
+                    "Press M to open the map. Drag to pan; mouse wheel zooms.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Craft Faster",
+                    "Hold Shift while clicking a recipe to craft as many as possible.",
+                );
+                spawn_tip_row(
+                    list,
+                    "Cancel",
+                    "Esc or right click clears placement or closes the open panel.",
+                );
+            });
+        });
+}
+
+pub(crate) fn spawn_tip_row(
+    parent: &mut ChildSpawnerCommands,
+    title: &'static str,
+    body: &'static str,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            min_height: Val::Px(24.0),
+            column_gap: Val::Px(12.0),
+            align_items: AlignItems::FlexStart,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(title),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.96, 0.85, 0.56)),
+                hud_text_shadow(),
+                Node {
+                    width: Val::Px(116.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
+            row.spawn((
+                Text::new(body),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.9, 0.86)),
+                hud_text_shadow(),
+                Node {
+                    flex_grow: 1.0,
+                    ..default()
+                },
+            ));
         });
 }
 
@@ -1662,6 +1955,7 @@ pub(crate) fn ui_visibility_system(
     mut commands: Commands,
     ui_state: Res<UiState>,
     icons: Res<UiIconAssets>,
+    crafting_ui: Res<CraftingUiState>,
     mut overlay_query: Query<&mut Visibility, With<UiOverlay>>,
     panel_query: Query<Entity, With<UiPanelRoot>>,
     children_query: Query<&Children, With<UiPanelRoot>>,
@@ -1694,9 +1988,9 @@ pub(crate) fn ui_visibility_system(
         }
         UiMode::Crafting => {
             *overlay_visibility = Visibility::Visible;
-            commands
-                .entity(panel_entity)
-                .with_children(|parent| spawn_crafting_panel(parent, &icons));
+            commands.entity(panel_entity).with_children(|parent| {
+                spawn_crafting_panel(parent, &icons, crafting_ui.active_tab)
+            });
         }
         UiMode::Chest { .. } => {
             *overlay_visibility = Visibility::Visible;
@@ -1979,6 +2273,39 @@ pub(crate) fn placement_direction_ui_system(
     }
 }
 
+pub(crate) fn crafting_tab_button_system(
+    mut crafting_ui: ResMut<CraftingUiState>,
+    mut query: Query<(&Interaction, &CraftingTabButton), Changed<Interaction>>,
+) {
+    for (interaction, button) in &mut query {
+        if *interaction == Interaction::Pressed {
+            crafting_ui.active_tab = button.tab;
+            crafting_ui.hovered_item = None;
+        }
+    }
+}
+
+pub(crate) fn crafting_tab_visual_system(
+    crafting_ui: Res<CraftingUiState>,
+    mut tab_query: Query<(
+        &CraftingTabButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut content_query: Query<(&CraftingTabContent, &mut Node)>,
+) {
+    for (button, interaction, mut background, mut border) in &mut tab_query {
+        let active = crafting_ui.active_tab == button.tab;
+        *background = BackgroundColor(crafting_tab_background(active, *interaction));
+        *border = BorderColor(crafting_tab_border(active));
+    }
+
+    for (content, mut node) in &mut content_query {
+        node.display = crafting_tab_display(content.tab, crafting_ui.active_tab);
+    }
+}
+
 pub(crate) fn inventory_cell_hover_system(
     mut crafting_ui: ResMut<CraftingUiState>,
     mut query: Query<(&Interaction, &InventoryCellButton), Changed<Interaction>>,
@@ -2003,6 +2330,10 @@ pub(crate) fn crafting_recipe_button_system(
     mut hotbar: ResMut<HotbarState>,
     mut query: Query<(&Interaction, &RecipeButton), Changed<Interaction>>,
 ) {
+    if crafting_ui.active_tab != CraftingTab::Crafting {
+        return;
+    }
+
     for (interaction, button) in &mut query {
         if *interaction == Interaction::Hovered || *interaction == Interaction::Pressed {
             crafting_ui.focused_recipe = button.recipe_index;

@@ -19,6 +19,7 @@ impl Plugin for FoundryGameplayPlugin {
                 .in_set(UpdateSet::Input),
         )
         .add_systems(Update, (mining_input_system,).in_set(UpdateSet::Input))
+        .add_systems(Update, (placement_preview_system,).in_set(UpdateSet::World))
         .add_systems(
             Update,
             (
@@ -87,6 +88,106 @@ pub(crate) fn hotbar_input_system(
             select_hotbar_slot(index, &player.inventory, &mut hotbar, &mut placement);
             break;
         }
+    }
+}
+
+pub(crate) fn placement_preview_system(
+    mut commands: Commands,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    placement: Res<PlacementState>,
+    ui_state: Res<UiState>,
+    player: Res<PlayerState>,
+    config: Res<WorldRenderConfig>,
+    session: Res<WorldSession>,
+    runtime: Res<WorldRuntime>,
+    preview_assets: Res<PlacementPreviewAssets>,
+    hotbar_interactions: Query<&Interaction, With<HotbarSlotButton>>,
+    mut preview_query: Query<
+        (&mut Sprite, &mut Transform, &mut Visibility),
+        With<PlacementPreview>,
+    >,
+) {
+    let Some(item) = placement.selected else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+    if ui_state.mode != UiMode::None
+        || player.inventory.count(item) == 0
+        || !is_placeable_item(item)
+        || hotbar_interactions
+            .iter()
+            .any(|interaction| *interaction != Interaction::None)
+    {
+        hide_placement_preview(&mut preview_query);
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+
+    let tile_x = (world_pos.x / config.tile_size).floor() as i32;
+    let tile_y = (world_pos.y / config.tile_size).floor() as i32;
+    let center = Vec3::new(
+        (tile_x as f32 + 0.5) * config.tile_size,
+        (tile_y as f32 + 0.5) * config.tile_size,
+        8.0,
+    );
+    let can_place = can_place_tile(tile_x, tile_y, item, &config, &session, &runtime, &player);
+    let color = if can_place {
+        Color::srgba(1.0, 1.0, 1.0, 0.68)
+    } else {
+        Color::srgba(1.0, 0.42, 0.42, 0.62)
+    };
+    let Some(image) = preview_assets.for_item(item) else {
+        hide_placement_preview(&mut preview_query);
+        return;
+    };
+    let size = Some(Vec2::splat(config.tile_size));
+
+    if let Some((mut sprite, mut transform, mut visibility)) = preview_query.iter_mut().next() {
+        sprite.image = image;
+        sprite.custom_size = size;
+        sprite.color = color;
+        transform.translation = center;
+        *visibility = Visibility::Visible;
+    } else {
+        commands.spawn((
+            Sprite {
+                image,
+                custom_size: size,
+                color,
+                ..default()
+            },
+            Transform::from_translation(center),
+            Visibility::Visible,
+            PlacementPreview,
+        ));
+    }
+}
+
+fn hide_placement_preview(
+    preview_query: &mut Query<
+        (&mut Sprite, &mut Transform, &mut Visibility),
+        With<PlacementPreview>,
+    >,
+) {
+    for (_, _, mut visibility) in preview_query.iter_mut() {
+        *visibility = Visibility::Hidden;
     }
 }
 
@@ -1355,6 +1456,55 @@ pub(crate) fn try_mine_tile(
         );
     }
     MineAttempt::Mined
+}
+
+pub(crate) fn can_place_tile(
+    tile_x: i32,
+    tile_y: i32,
+    item: ItemId,
+    config: &WorldRenderConfig,
+    session: &WorldSession,
+    runtime: &WorldRuntime,
+    player: &PlayerState,
+) -> bool {
+    let Some(placed_kind) = item_to_placed_kind(item) else {
+        return false;
+    };
+    if player.inventory.count(item) == 0 {
+        return false;
+    }
+
+    let (coord, local_x, local_y) = tile_to_chunk_local(tile_x, tile_y);
+    let key = ChunkKey::new(session.world_id.clone(), coord, config.layer);
+    let Some(loaded) = runtime.loaded.get(&key) else {
+        return false;
+    };
+    let edge = CHUNK_EDGE as i32;
+    let idx = (local_y as usize) * (edge as usize) + (local_x as usize);
+    let tile = tile_at(&loaded.data, local_x, local_y, session.world_seed);
+    if is_water(tile) {
+        return false;
+    }
+    if placed_kind == PLACED_MINING_DRILL {
+        let resource = loaded
+            .data
+            .resources
+            .get(idx)
+            .copied()
+            .unwrap_or(ResourceCell {
+                kind: RES_NONE,
+                amount: 0,
+            });
+        if resource.kind == RES_NONE || resource.amount == 0 {
+            return false;
+        }
+    }
+
+    loaded
+        .data
+        .placed
+        .get(idx)
+        .is_some_and(|cell| cell.kind == PLACED_NONE)
 }
 
 pub(crate) fn try_place_at_world_pos(
